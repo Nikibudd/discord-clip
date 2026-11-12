@@ -19,6 +19,7 @@ mod hotkey;
 mod log;
 mod ringbuffer;
 mod tray;
+mod ui;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -45,11 +46,14 @@ Runs in the system tray. Settings are read from
   -o, --out <DIR>      Folder to save clips in
       --no-clipboard   Don't copy saved clips to the clipboard
       --no-notifications  Don't show a notification for each saved clip
+      --settings       Open the settings window on start
   -h, --help           Show this help";
 
-/// Returns `(setting, value)` overrides from the command line.
-fn parse_cli() -> Result<Vec<(&'static str, String)>> {
+/// Returns `(setting, value)` overrides from the command line, and whether
+/// `--settings` was given.
+fn parse_cli() -> Result<(Vec<(&'static str, String)>, bool)> {
     let mut out = Vec::new();
+    let mut open_window = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().with_context(|| format!("{name} needs a value"));
@@ -65,6 +69,10 @@ fn parse_cli() -> Result<Vec<(&'static str, String)>> {
             }
             "--no-clipboard" => ("clipboard", "false".into()),
             "--no-notifications" => ("notifications", "false".into()),
+            "--settings" => {
+                open_window = true;
+                continue;
+            }
             "-h" | "--help" => {
                 show_text(USAGE, false);
                 std::process::exit(0);
@@ -73,7 +81,7 @@ fn parse_cli() -> Result<Vec<(&'static str, String)>> {
         };
         out.push(pair);
     }
-    Ok(out)
+    Ok((out, open_window))
 }
 
 /// Prints to the console we were started from, if any; otherwise shows a
@@ -121,7 +129,7 @@ fn single_instance() -> Option<HANDLE> {
 
 fn main() {
     has_parent_console(); // attach early so --help / errors reach the terminal
-    let overrides = match parse_cli() {
+    let (overrides, open_window) = match parse_cli() {
         Ok(o) => o,
         Err(e) => {
             show_text(&format!("{e:#}"), true);
@@ -207,6 +215,7 @@ fn main() {
         discord_status,
         Arc::clone(&running),
         warnings,
+        open_window,
     );
     let exit = match tray::run(app) {
         Ok(e) => e,
@@ -219,9 +228,11 @@ fn main() {
         let _ = CloseHandle(instance);
     }
 
-    if exit == tray::Exit::Reload {
+    if exit == tray::Exit::Restart {
+        // Same command-line overrides, and bring the settings window back.
         let exe = std::env::current_exe().expect("current exe");
-        if let Err(e) = std::process::Command::new(exe).args(std::env::args_os().skip(1)).spawn() {
+        let args = std::env::args_os().skip(1).filter(|a| a != "--settings");
+        if let Err(e) = std::process::Command::new(exe).args(args).arg("--settings").spawn() {
             fatal(&format!("Couldn't restart: {e}"));
         }
     }
