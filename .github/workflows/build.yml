@@ -1,30 +1,33 @@
-# Builds, tests and packages Discord Clip on every push.
+# Reusable: tests, builds and packages Discord Clip, and optionally publishes
+# a GitHub release. Called by ci.yml (every push) and release.yml (merged PRs
+# into main).
 #
-# Every run uploads the installer + portable exe as a workflow artifact.
-# Pushing a tag `vX.Y.Z` (matching the version in Cargo.toml) also publishes a
-# GitHub release with:
-#   discord-clip-X.Y.Z-setup.exe     installer (per-user, no admin)
-#   discord-clip-X.Y.Z-portable.exe  standalone exe
-#   latest.json                      update manifest the app can poll
+# The version is stamped into Cargo.toml/Cargo.lock for the build only (never
+# committed), so the exe reports it through CARGO_PKG_VERSION.
+#
+# Outputs (in dist/, uploaded as an artifact):
+#   discord-clip-<version>-setup.exe     installer (per-user, no admin)
+#   discord-clip-<version>-portable.exe  standalone exe
+#   latest.json                          update manifest the app can poll
 #   SHA256SUMS.txt
-#
-# The update manifest of the newest (non-pre)release is always at
-#   https://github.com/<owner>/<repo>/releases/latest/download/latest.json
 
 name: build
 
 on:
-  push:
-    branches: ["**"]
-    tags: ["v*"]
-  workflow_dispatch:
-
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
-
-permissions:
-  contents: write # creating releases
+  workflow_call:
+    inputs:
+      version:
+        description: Release version (X.Y.Z or X.Y.Z-pre). Empty = dev build.
+        type: string
+        default: ''
+      ref:
+        description: Commit to build. Empty = the triggering commit.
+        type: string
+        default: ''
+      publish:
+        description: Publish a GitHub release vVERSION at `ref`.
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -34,6 +37,8 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Install Rust
         run: |
@@ -42,26 +47,31 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Work out version
+      - name: Stamp version
         id: version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
-          $ref = '${{ github.ref }}'
-          if ($ref.StartsWith('refs/tags/')) {
-            $tag = $ref.Substring('refs/tags/'.Length)
-            if ($tag -ne "v$v") { throw "Tag $tag doesn't match the version in Cargo.toml ($v). Bump Cargo.toml first." }
-            $label = $v
-            $release = 'true'
-          } else {
-            $label = "$v-dev.$($env:GITHUB_SHA.Substring(0, 7))"
-            $release = 'false'
+          $v = $env:RELEASE_VERSION
+          if (-not $v) {
+            $base = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+            $sha = (git rev-parse --short=7 HEAD).Trim()
+            $v = "$($base.Split('-')[0])-dev.g$sha"
           }
-          "version=$v"                         >> $env:GITHUB_OUTPUT
-          "numeric=$($v.Split('-')[0])"        >> $env:GITHUB_OUTPUT
-          "label=$label"                       >> $env:GITHUB_OUTPUT
-          "release=$release"                   >> $env:GITHUB_OUTPUT
-          "prerelease=$($v.Contains('-'))"     >> $env:GITHUB_OUTPUT
-          Write-Host "Version $v, building $label (release: $release)"
+          $toml = Get-Content Cargo.toml -Raw
+          $toml = ([regex]'(?m)^version = "[^"]*"').Replace($toml, "version = `"$v`"", 1)
+          Set-Content Cargo.toml $toml -NoNewline -Encoding utf8NoBOM
+          $lock = Get-Content Cargo.lock -Raw
+          $lock = ([regex]'(name = "discord-clip"\r?\nversion = )"[^"]*"').Replace($lock, '${1}"' + $v + '"', 1)
+          Set-Content Cargo.lock $lock -NoNewline -Encoding utf8NoBOM
+
+          $check = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ($check -ne $v) { throw "Couldn't stamp version $v (Cargo.toml says $check)" }
+          "version=$v"                      >> $env:GITHUB_OUTPUT
+          "numeric=$($v.Split('-')[0])"     >> $env:GITHUB_OUTPUT
+          "prerelease=$($v.Contains('-'))"  >> $env:GITHUB_OUTPUT
+          "sha=$((git rev-parse HEAD).Trim())" >> $env:GITHUB_OUTPUT
+          Write-Host "Building version $v"
 
       - name: Test
         run: cargo test --locked
@@ -76,23 +86,22 @@ jobs:
             choco install innosetup -y --no-progress
             if ($LASTEXITCODE -ne 0) { throw "Couldn't install Inno Setup" }
           }
-          $label = '${{ steps.version.outputs.label }}'
+          $v = '${{ steps.version.outputs.version }}'
           & $iscc /Q `
-            "/DAppVersion=$label" `
+            "/DAppVersion=$v" `
             "/DNumericVersion=${{ steps.version.outputs.numeric }}" `
-            "/DOutputName=discord-clip-$label-setup" `
+            "/DOutputName=discord-clip-$v-setup" `
             "/DSourceExe=..\target\release\discord-clip.exe" `
             installer\discord-clip.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
       - name: Package
         run: |
-          $label = '${{ steps.version.outputs.label }}'
           $v = '${{ steps.version.outputs.version }}'
           $repo = '${{ github.repository }}'
           $tag = "v$v"
-          $setup = "discord-clip-$label-setup.exe"
-          $portable = "discord-clip-$label-portable.exe"
+          $setup = "discord-clip-$v-setup.exe"
+          $portable = "discord-clip-$v-portable.exe"
           Copy-Item target\release\discord-clip.exe "dist\$portable"
 
           $base = "https://github.com/$repo/releases/download/$tag"
@@ -128,7 +137,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: discord-clip-${{ steps.version.outputs.label }}
+          name: discord-clip-${{ steps.version.outputs.version }}
           path: |
             dist/*.exe
             dist/latest.json
@@ -136,12 +145,12 @@ jobs:
           if-no-files-found: error
 
       - name: Publish release
-        if: steps.version.outputs.release == 'true'
+        if: inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $v = '${{ steps.version.outputs.version }}'
-          $flags = @('--title', "Discord Clip $v", '--generate-notes', '--verify-tag')
+          $flags = @('--title', "Discord Clip $v", '--generate-notes', '--target', '${{ steps.version.outputs.sha }}')
           if ('${{ steps.version.outputs.prerelease }}' -eq 'True') { $flags += '--prerelease' }
           gh release create "v$v" @flags `
             "dist\discord-clip-$v-setup.exe" `

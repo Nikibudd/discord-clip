@@ -1,0 +1,71 @@
+# Publishes a release when a pull request into main is merged, if its
+# description says which version to release:
+#
+#   Release: patch | minor | major | X.Y.Z | X.Y.Z-beta.1 | none
+#
+# While the PR is open, the "release version" check shows which version the
+# merge would publish (or fails if the Release line is invalid). No Release
+# line, or `Release: none`, means the merge publishes nothing.
+# See .github/scripts/release-version.ps1.
+
+name: release
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened, closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  version:
+    name: release version
+    # An unmerged close needs no check.
+    if: github.event.action != 'closed' || github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - id: compute
+        shell: pwsh
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: ./.github/scripts/release-version.ps1 -Body $env:PR_BODY
+
+  publish:
+    needs: version
+    if: github.event.action == 'closed' && github.event.pull_request.merged && needs.version.outputs.version != ''
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      ref: ${{ github.event.pull_request.merge_commit_sha }}
+      publish: true
+
+  comment:
+    needs: [version, publish]
+    if: always() && github.event.action == 'closed' && github.event.pull_request.merged && needs.version.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.publish.result }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$RESULT" = success ]; then
+            msg="Published [v$VERSION](https://github.com/$REPO/releases/tag/v$VERSION)."
+          else
+            msg="Publishing v$VERSION failed ($RESULT): $RUN"
+          fi
+          gh pr comment "$PR" --repo "$REPO" --body "$msg"
