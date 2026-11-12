@@ -8,6 +8,8 @@ use std::time::SystemTime;
 use anyhow::{bail, Context, Result};
 use windows::core::PCWSTR;
 
+use crate::volumes::Volumes;
+
 /// Number of bars in a clip's waveform.
 pub const WAVEFORM_BARS: usize = 48;
 
@@ -269,15 +271,16 @@ pub fn replace_with_trimmed(src: &Path, start: f32, end: f32) -> Result<()> {
 }
 
 /// Writes the trimmed part to a temporary file with the clip's file name (so
-/// that's the name Discord shows), for copying to the clipboard.
-pub fn trimmed_temp_copy(src: &Path, start: f32, end: f32) -> Result<PathBuf> {
+/// that's the name Discord shows), for copying to the clipboard. A clip with
+/// separate tracks is mixed at its `volumes`.
+pub fn trimmed_temp_copy(src: &Path, start: f32, end: f32, volumes: Volumes) -> Result<PathBuf> {
     let dir = std::env::temp_dir().join("discord-clip-trimmed");
     std::fs::create_dir_all(&dir)?;
     let trimmed = dir.join(format!(".trimmed-{}.wav", std::process::id()));
     write_trimmed(src, start, end, &trimmed)?;
     // Discord gets a normal stereo mix, named like the clip.
     let dest = dir.join(src.file_name().context("clip has no file name")?);
-    let (samples, rate) = read_stereo(&trimmed, Tracks::Both)?;
+    let (samples, rate) = read_stereo(&trimmed, Tracks::Both, volumes)?;
     let _ = std::fs::remove_file(&trimmed);
     write_stereo(&dest, &samples, rate)?;
     Ok(dest)
@@ -294,11 +297,23 @@ pub enum Tracks {
     Mic,
 }
 
+impl Tracks {
+    /// Gains of the Discord and mic tracks for this choice.
+    pub fn gains(self, v: Volumes) -> (f32, f32) {
+        match self {
+            Tracks::Both => (v.discord, v.mic),
+            Tracks::Discord => (v.discord, 0.0),
+            Tracks::Mic => (0.0, v.mic),
+        }
+    }
+}
+
 /// Reads a clip as interleaved stereo (-1..=1) and its sample rate. Clips
-/// with separate tracks (4 channels: Discord L/R + mic L/R) are mixed, or
-/// reduced to one track. Mono is doubled; other layouts keep the first two
-/// channels. `tracks` only matters for 4-channel clips.
-pub fn read_stereo(path: &Path, tracks: Tracks) -> Result<(Vec<f32>, u32)> {
+/// with separate tracks (4 channels: Discord L/R + mic L/R) are mixed at
+/// `volumes`, or reduced to one track. Mono is doubled; other layouts keep
+/// the first two channels. `tracks` and `volumes` only matter for 4-channel
+/// clips.
+pub fn read_stereo(path: &Path, tracks: Tracks, volumes: Volumes) -> Result<(Vec<f32>, u32)> {
     let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
     let spec = reader.spec();
     let samples: Vec<f32> = match spec.sample_format {
@@ -309,16 +324,13 @@ pub fn read_stereo(path: &Path, tracks: Tracks) -> Result<(Vec<f32>, u32)> {
         }
     };
     let channels = spec.channels.max(1) as usize;
+    let (d, m) = tracks.gains(volumes);
     let out = match channels {
         1 => samples.iter().flat_map(|&s| [s, s]).collect(),
         2 => samples,
         4 => samples
             .chunks_exact(4)
-            .flat_map(|f| match tracks {
-                Tracks::Both => [(f[0] + f[2]).clamp(-1.0, 1.0), (f[1] + f[3]).clamp(-1.0, 1.0)],
-                Tracks::Discord => [f[0], f[1]],
-                Tracks::Mic => [f[2], f[3]],
-            })
+            .flat_map(|f| [(f[0] * d + f[2] * m).clamp(-1.0, 1.0), (f[1] * d + f[3] * m).clamp(-1.0, 1.0)])
             .collect(),
         n => samples.chunks_exact(n).flat_map(|f| [f[0], f[1]]).collect(),
     };
@@ -341,9 +353,9 @@ pub fn channels(path: &Path) -> Result<u16> {
 }
 
 /// The file to hand to Discord (clipboard): the clip itself if it's a normal
-/// stereo clip, otherwise a stereo mix (or one track) written to a temporary
-/// file named like the clip.
-pub fn shareable_copy(src: &Path, tracks: Tracks) -> Result<PathBuf> {
+/// stereo clip, otherwise a stereo mix (or one track) at the clip's
+/// `volumes`, written to a temporary file named like the clip.
+pub fn shareable_copy(src: &Path, tracks: Tracks, volumes: Volumes) -> Result<PathBuf> {
     if channels(src)? <= 2 {
         return Ok(src.to_path_buf());
     }
@@ -356,7 +368,7 @@ pub fn shareable_copy(src: &Path, tracks: Tracks) -> Result<PathBuf> {
         Tracks::Mic => format!("{stem} (mic only).wav"),
     };
     let dest = dir.join(name);
-    let (samples, rate) = read_stereo(src, tracks)?;
+    let (samples, rate) = read_stereo(src, tracks, volumes)?;
     write_stereo(&dest, &samples, rate)?;
     Ok(dest)
 }
@@ -485,7 +497,7 @@ mod tests {
         let second = save_trimmed_copy(&src, 0.0, 0.5).unwrap();
         assert_eq!(second.file_name().unwrap(), "discord_clip_20261109_213151 Bob (trimmed 2).wav");
 
-        let tmp = trimmed_temp_copy(&src, 0.0, 0.1).unwrap();
+        let tmp = trimmed_temp_copy(&src, 0.0, 0.1, Volumes::default()).unwrap();
         assert_eq!(tmp.file_name(), src.file_name());
         assert_eq!(hound::WavReader::open(&tmp).unwrap().duration(), 9_600);
         assert!(write_trimmed(&src, 0.6, 0.6, &dir.join("empty.wav")).is_err());
@@ -505,30 +517,42 @@ mod tests {
         assert_eq!(analyze(&src).unwrap().channels, 4);
 
         let near = |a: f32, b: f32| (a - b).abs() < 0.001;
-        let (both, rate) = read_stereo(&src, Tracks::Both).unwrap();
+        let (both, rate) = read_stereo(&src, Tracks::Both, Volumes::default()).unwrap();
         assert_eq!(rate, 48_000);
         assert_eq!(both.len(), 2 * 480);
         assert!(near(both[0], 0.375) && near(both[1], 0.25), "{:?}", &both[..2]);
-        let (discord, _) = read_stereo(&src, Tracks::Discord).unwrap();
+        let (discord, _) = read_stereo(&src, Tracks::Discord, Volumes::default()).unwrap();
         assert!(near(discord[0], 0.25) && near(discord[1], 0.5));
-        let (mic, _) = read_stereo(&src, Tracks::Mic).unwrap();
+        let (mic, _) = read_stereo(&src, Tracks::Mic, Volumes::default()).unwrap();
         assert!(near(mic[0], 0.125) && near(mic[1], -0.25));
 
+        // Per-clip volumes (#7): Discord at 50%, mic at 200%.
+        let v = Volumes { discord: 0.5, mic: 2.0 };
+        let (mixed, _) = read_stereo(&src, Tracks::Both, v).unwrap();
+        assert!(near(mixed[0], 0.375) && near(mixed[1], -0.25), "{:?}", &mixed[..2]);
+        let (mic, _) = read_stereo(&src, Tracks::Mic, v).unwrap();
+        assert!(near(mic[0], 0.25) && near(mic[1], -0.5));
+        let (muted, _) = read_stereo(&src, Tracks::Both, Volumes { discord: 0.0, mic: 1.0 }).unwrap();
+        assert!(near(muted[0], 0.125) && near(muted[1], -0.25));
+        let adjusted = shareable_copy(&src, Tracks::Both, v).unwrap();
+        let (adjusted, _) = read_stereo(&adjusted, Tracks::Both, Volumes::default()).unwrap();
+        assert!(near(adjusted[0], 0.375) && near(adjusted[1], -0.25));
+
         // Shared copies are stereo files named after the clip.
-        let shared = shareable_copy(&src, Tracks::Both).unwrap();
+        let shared = shareable_copy(&src, Tracks::Both, Volumes::default()).unwrap();
         assert_eq!(shared.file_name(), src.file_name());
         assert_eq!(channels(&shared).unwrap(), 2);
-        let mic_only = shareable_copy(&src, Tracks::Mic).unwrap();
+        let mic_only = shareable_copy(&src, Tracks::Mic, Volumes::default()).unwrap();
         assert_eq!(mic_only.file_name().unwrap(), "discord_clip_20261109_213151 (mic only).wav");
         // A normal stereo clip is shared as itself.
         let stereo = dir.join("stereo.wav");
         crate::clip::write_wav(&stereo, &[0.1, 0.1]).unwrap();
-        assert_eq!(shareable_copy(&stereo, Tracks::Both).unwrap(), stereo);
+        assert_eq!(shareable_copy(&stereo, Tracks::Both, Volumes::default()).unwrap(), stereo);
 
         // Trimming keeps both tracks; the trimmed copy for Discord is a stereo mix.
         let trimmed = save_trimmed_copy(&src, 0.0, 0.5).unwrap();
         assert_eq!(channels(&trimmed).unwrap(), 4);
-        assert_eq!(channels(&trimmed_temp_copy(&src, 0.0, 0.5).unwrap()).unwrap(), 2);
+        assert_eq!(channels(&trimmed_temp_copy(&src, 0.0, 0.5, Volumes::default()).unwrap()).unwrap(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

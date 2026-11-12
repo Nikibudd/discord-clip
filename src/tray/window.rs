@@ -126,7 +126,7 @@ pub(super) fn handle_ui_command(app: &App, cmd: Command) {
             }
         }
         Command::CopyClip(path, tracks) => {
-            let shared = crate::library::shareable_copy(&path, tracks);
+            let shared = crate::library::shareable_copy(&path, tracks, crate::volumes::get(&path));
             if let Err(e) = shared.and_then(|p| crate::clip::copy_file_to_clipboard(&p)) {
                 log!("clipboard copy failed: {e:#}");
                 notify(app, "Couldn't copy the clip", &format!("{e:#}"), true);
