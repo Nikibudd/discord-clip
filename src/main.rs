@@ -17,6 +17,7 @@ mod clip;
 mod config;
 mod hotkey;
 mod icon;
+mod library;
 mod log;
 mod ringbuffer;
 mod tray;

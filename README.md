@@ -23,6 +23,11 @@ Requires Windows 10 2004 (build 19041) or newer. Supports Discord, PTB and Canar
 Left-click the tray icon to open the Discord Clip window: a Discord-styled
 window with a sidebar of pages. Closing it just hides it again.
 
+- **Clips** (the page it opens on): every clip in the clips folder as a card
+  with its waveform, date, length and size, newest first. Click the waveform
+  to play it; **Copy** puts it on the clipboard for Ctrl+V in Discord,
+  **Show** opens it in Explorer, **Delete** moves it to the Recycle Bin. New
+  clips appear on their own.
 - **Settings**: hotkey recorder (combos already taken by another app are
   rejected), clip length, microphone on/off and volume, clips folder,
   clipboard and notification toggles, and buttons to open/reload
@@ -159,7 +164,7 @@ it from the tray before copying a new build over it).
 | --- | --- |
 | `src/main.rs` | Startup, single-instance check, CLI overrides, Discord supervisor thread |
 | `src/tray/` | The tray app (main thread): `mod.rs` app state + message loop, `notify_icon.rs` tray icon/tooltip/notifications, `menu.rs` right-click menu, `global_hotkey.rs` save-clip hotkey, `actions.rs` saving clips + opening folders, `window.rs` snapshot/commands for the window, folder picker, update hand-off |
-| `src/ui/` | The window (egui, own thread): `mod.rs` command/snapshot API + window lifecycle, `theme.rs` Discord colors/fonts, `widgets.rs` buttons/toggles/sliders, `sidebar.rs`, `keybind.rs` hotkey recorder, one file per page (`settings.rs`, `updates.rs`) |
+| `src/ui/` | The window (egui, own thread): `mod.rs` command/snapshot API + window lifecycle, `theme.rs` Discord colors/fonts, `widgets.rs` buttons/toggles/sliders, `sidebar.rs`, `keybind.rs` hotkey recorder, one file per page (`clips.rs`, `settings.rs`, `updates.rs`) |
 | `src/icon.rs` | The app icon, drawn at runtime (tray + window) |
 | `src/update.rs` | Update checks and in-app updates: fetches `latest.json` over WinHTTP, downloads + SHA-256-verifies the installer or portable exe, hands over to it |
 | `src/config.rs` | `config.ini` load/save/validation |
@@ -167,4 +172,5 @@ it from the tray before copying a new build over it).
 | `src/capture.rs` | Finds the root Discord process; process-loopback / mic WASAPI streams in a fixed 48 kHz stereo format, event-driven; pads silence when the stream goes quiet so the buffer stays in step with real time |
 | `src/ringbuffer.rs` | Fixed-size circular sample buffer |
 | `src/clip.rs` | Mixes tracks (aligned at the hotkey press), writes 16-bit WAV, copies the file to the clipboard |
+| `src/library.rs` | The clips folder as a library: listing clips, reading length + waveform, playback (PlaySound), Recycle Bin |
 | `src/log.rs` | Log file |
