@@ -158,8 +158,9 @@ it from the tray before copying a new build over it).
 | File | Role |
 | --- | --- |
 | `src/main.rs` | Startup, single-instance check, CLI overrides, Discord supervisor thread |
-| `src/tray.rs` | Tray icon (drawn at runtime), menu, notifications, global hotkey, folder picker; applies changes requested by the window |
-| `src/ui.rs` | The window (egui, on its own thread): Discord-styled sidebar with Settings and Updates pages; sends commands to the tray thread and draws the snapshot it publishes back |
+| `src/tray/` | The tray app (main thread): `mod.rs` app state + message loop, `notify_icon.rs` tray icon/tooltip/notifications, `menu.rs` right-click menu, `global_hotkey.rs` save-clip hotkey, `actions.rs` saving clips + opening folders, `window.rs` snapshot/commands for the window, folder picker, update hand-off |
+| `src/ui/` | The window (egui, own thread): `mod.rs` command/snapshot API + window lifecycle, `theme.rs` Discord colors/fonts, `widgets.rs` buttons/toggles/sliders, `sidebar.rs`, `keybind.rs` hotkey recorder, one file per page (`settings.rs`, `updates.rs`) |
+| `src/icon.rs` | The app icon, drawn at runtime (tray + window) |
 | `src/update.rs` | Update checks and in-app updates: fetches `latest.json` over WinHTTP, downloads + SHA-256-verifies the installer or portable exe, hands over to it |
 | `src/config.rs` | `config.ini` load/save/validation |
 | `src/hotkey.rs` | Parsing/formatting `Ctrl+Alt+C`-style hotkeys |
