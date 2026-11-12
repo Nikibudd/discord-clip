@@ -18,16 +18,24 @@ you press the hotkey (**Ctrl+Alt+C** by default).
 
 Requires Windows 10 2004 (build 19041) or newer. Supports Discord, PTB and Canary.
 
+## Window
+
+Left-click the tray icon to open the Discord Clip window: a Discord-styled
+window with a sidebar of pages. Closing it just hides it again.
+
+- **Settings**: hotkey recorder (combos already taken by another app are
+  rejected), clip length, microphone on/off and volume, clips folder,
+  clipboard and notification toggles, and buttons to open/reload
+  `config.ini` and the log. Changes save immediately. Clip length and the
+  microphone switch apply after a restart; a bar offers to do that for you.
+
 ## Tray menu
 
-Right- or left-click the tray icon:
+Right-click the tray icon:
 
+- **Open Discord Clip**
 - **Save clip now**
 - **Open clips folder**
-- **Change hotkey...**: press the new combination in the picker. Combos
-  already taken by another app are rejected.
-- **Change clips folder...**: standard folder picker; saved permanently
-- **Edit settings file...** / **Reload settings**
 - **Open log**: `%LOCALAPPDATA%\discord-clip\discord-clip.log`
 - **Quit**
 
@@ -49,13 +57,72 @@ Command-line flags override the file for one run without changing it:
 `--hotkey`, `-s/--seconds`, `--no-mic`, `--mic-gain`, `-o/--out`,
 `--no-clipboard`, `--no-notifications`, `-h/--help`.
 
+## Releases
+
+GitHub Actions builds and tests every push (`ci.yml`) and attaches the
+installer + portable exe to the run as an artifact, versioned
+`X.Y.Z-dev.g<commit>`.
+
+Releases are published from `main` when a pull request is merged
+(`release.yml`). The PR description decides the version, via its
+`Release:` line (the PR template adds one):
+
+| `Release:` | Publishes |
+| --- | --- |
+| `patch` / `minor` / `major` | The latest release bumped, e.g. 0.3.0 → 0.3.1 / 0.4.0 / 1.0.0 |
+| `1.2.3` | Exactly that version. `1.2.3-beta.1` is a pre-release (doesn't count as "latest") |
+| `none`, or no line | Nothing |
+
+While the PR is open, its **release version** check shows what the merge will
+publish, and fails on an invalid line (unknown word, not newer than the latest
+release, tag already exists). After the merge the version is stamped into the
+build, the merge commit is tagged `vX.Y.Z`, and the bot comments the release
+link on the PR. The `version` in `Cargo.toml` is only used for local and dev
+builds; nothing is committed back.
+
+The release gets:
+
+| Asset | What |
+| --- | --- |
+| `discord-clip-X.Y.Z-setup.exe` | Installer (Inno Setup, `installer/discord-clip.iss`): per-user, no admin, installs to `%LOCALAPPDATA%\Programs\discord-clip`, Start menu entry, optional start with Windows |
+| `discord-clip-X.Y.Z-portable.exe` | The standalone exe |
+| `latest.json` | Update manifest (below) |
+| `SHA256SUMS.txt` | Checksums |
+
+### Update manifest
+
+The newest non-pre-release's manifest is always at
+`https://github.com/Nikibudd/discord-clip/releases/latest/download/latest.json`
+(a plain download, so no GitHub API rate limits):
+
+```json
+{
+  "schema": 1,
+  "version": "0.3.0",
+  "tag": "v0.3.0",
+  "published": "2026-11-12T18:00:00Z",
+  "notes_url": "https://github.com/Nikibudd/discord-clip/releases/tag/v0.3.0",
+  "min_windows": "10.0.19041",
+  "installer": { "name": "discord-clip-0.3.0-setup.exe", "url": "...", "size": 4200000, "sha256": "..." },
+  "portable":  { "name": "discord-clip-0.3.0-portable.exe", "url": "...", "size": 12700000, "sha256": "..." }
+}
+```
+
+An in-app updater compares `version` with `CARGO_PKG_VERSION`, downloads
+`installer.url`, checks `sha256`, runs it with
+`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` and exits; the installer closes any
+running copy, installs over it and starts the new version. The repo must be
+public for the app to reach these URLs without a token.
+
 ## Building
 
 With the MSVC toolchain this needs the "Desktop development with C++" workload
-(Build Tools for Visual Studio). Without it, the GNU toolchain works out of the
-box:
+(Build Tools for Visual Studio). Without it, use the GNU toolchain plus a full
+MinGW (the window's dependencies need a working `dlltool`, and the one rustup
+ships can't run on its own):
 
 ```
+scoop install mingw
 rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
 cargo +stable-x86_64-pc-windows-gnu build --release
 cargo +stable-x86_64-pc-windows-gnu test
@@ -69,7 +136,8 @@ it from the tray before copying a new build over it).
 | File | Role |
 | --- | --- |
 | `src/main.rs` | Startup, single-instance check, CLI overrides, Discord supervisor thread |
-| `src/tray.rs` | Tray icon (drawn at runtime), menu, notifications, hotkey dialog, folder picker |
+| `src/tray.rs` | Tray icon (drawn at runtime), menu, notifications, global hotkey, folder picker; applies changes requested by the window |
+| `src/ui.rs` | The window (egui, on its own thread): Discord-styled sidebar + Settings page; sends commands to the tray thread and draws the snapshot it publishes back |
 | `src/config.rs` | `config.ini` load/save/validation |
 | `src/hotkey.rs` | Parsing/formatting `Ctrl+Alt+C`-style hotkeys |
 | `src/capture.rs` | Finds the root Discord process; process-loopback / mic WASAPI streams in a fixed 48 kHz stereo format, event-driven; pads silence when the stream goes quiet so the buffer stays in step with real time |

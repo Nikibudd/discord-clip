@@ -1,5 +1,6 @@
-//! System tray UI: icon, menu, notifications, hotkey picker and folder picker.
-//! Everything in here runs on the main (STA, UI) thread.
+//! System tray: icon, menu, notifications, global hotkey and folder picker.
+//! Everything in here runs on the main (STA) thread. The settings window
+//! (`ui.rs`) runs on its own thread and talks to this one via `ui::Command`.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -9,20 +10,13 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Arc;
 
 use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{
-    ERROR_CANCELLED, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
-};
+use windows::Win32::Foundation::{ERROR_CANCELLED, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, CreateFontIndirectW, DeleteObject, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, COLOR_BTNFACE, DIB_RGB_COLORS, HBRUSH, HFONT,
+    CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::{InitCommonControlsEx, ICC_HOTKEY_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX};
-use windows::Win32::UI::HiDpi::GetDpiForSystem;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, SetFocus, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT};
 use windows::Win32::UI::Shell::{
     FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, ShellExecuteW,
     Shell_NotifyIconW, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, NIF_ICON, NIF_INFO,
@@ -33,53 +27,51 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::capture::DiscordStatus;
 use crate::config::{self, Config};
-use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT};
+use crate::hotkey::Hotkey;
 use crate::log;
 use crate::ringbuffer::RingBuffer;
+use crate::ui::{self, Command, Snapshot};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_STATUS: u32 = WM_APP + 2;
+const WM_UI_COMMAND: u32 = WM_APP + 3;
 const NIN_BALLOONUSERCLICK: u32 = WM_USER + 5;
 const HOTKEY_ID: i32 = 1;
 const TRAY_UID: u32 = 1;
 
 const ID_SAVE: usize = 100;
 const ID_OPEN_FOLDER: usize = 101;
-const ID_HOTKEY: usize = 102;
-const ID_FOLDER: usize = 103;
-const ID_SETTINGS: usize = 104;
-const ID_RELOAD: usize = 105;
+const ID_WINDOW: usize = 102;
 const ID_LOG: usize = 106;
 const ID_QUIT: usize = 107;
-
-// Hotkey dialog.
-const IDOK: i32 = 1;
-const IDCANCEL: i32 = 2;
-const IDC_HOTKEY: i32 = 201;
-const IDC_INFO: i32 = 202;
-const HKM_SETHOTKEY: u32 = WM_USER + 1;
-const HKM_GETHOTKEY: u32 = WM_USER + 2;
-const HOTKEYF_SHIFT: u32 = 0x1;
-const HOTKEYF_CONTROL: u32 = 0x2;
-const HOTKEYF_ALT: u32 = 0x4;
 
 /// Main window, for other threads to post status updates to.
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 
-/// Tells the UI that `status` changed. Callable from any thread.
-pub fn post_status_changed() {
+fn post(msg: u32) {
     let h = MAIN_HWND.load(Ordering::SeqCst);
     if h != 0 {
         unsafe {
-            let _ = PostMessageW(HWND(h as *mut c_void), WM_STATUS, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(HWND(h as *mut c_void), msg, WPARAM(0), LPARAM(0));
         }
     }
+}
+
+/// Tells the UI that `status` changed. Callable from any thread.
+pub fn post_status_changed() {
+    post(WM_STATUS);
+}
+
+/// Tells the tray thread the window has queued commands. Callable from any thread.
+pub fn post_ui_command() {
+    post(WM_UI_COMMAND);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Exit {
     Quit,
-    Reload,
+    /// Restart (re-reading the config file) and reopen the settings window.
+    Restart,
 }
 
 pub struct App {
@@ -95,15 +87,21 @@ pub struct App {
     pub running: Arc<AtomicBool>,
     /// Shown as notifications once the tray icon exists.
     pub startup_warnings: Vec<String>,
+    /// Open the settings window right away (`--settings`).
+    pub open_window: bool,
 
+    /// Clip length and mic state the capture threads were started with;
+    /// changing them needs a restart.
+    running_seconds: u32,
+    running_mic: bool,
     hwnd: Cell<HWND>,
-    hotkey_dialog: Cell<HWND>,
     hotkey_registered: Cell<bool>,
+    /// Why the last hotkey change from the window failed.
+    hotkey_error: RefCell<Option<String>>,
     last_clip: RefCell<Option<PathBuf>>,
     taskbar_created: Cell<u32>,
     icon_active: Cell<HICON>,
     icon_idle: Cell<HICON>,
-    font: Cell<HFONT>,
     exit: Cell<Exit>,
 }
 
@@ -118,8 +116,11 @@ impl App {
         discord_status: Arc<std::sync::Mutex<DiscordStatus>>,
         running: Arc<AtomicBool>,
         startup_warnings: Vec<String>,
+        open_window: bool,
     ) -> Self {
         App {
+            running_seconds: cfg.seconds,
+            running_mic: cfg.mic,
             cfg: RefCell::new(cfg),
             file_cfg: RefCell::new(file_cfg),
             discord_ring,
@@ -128,14 +129,14 @@ impl App {
             discord_status,
             running,
             startup_warnings,
+            open_window,
             hwnd: Cell::new(HWND::default()),
-            hotkey_dialog: Cell::new(HWND::default()),
             hotkey_registered: Cell::new(false),
+            hotkey_error: RefCell::new(None),
             last_clip: RefCell::new(None),
             taskbar_created: Cell::new(0),
             icon_active: Cell::new(HICON::default()),
             icon_idle: Cell::new(HICON::default()),
-            font: Cell::new(HFONT::default()),
             exit: Cell::new(Exit::Quit),
         }
     }
@@ -158,10 +159,6 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
     APP.with(|a| *a.borrow_mut() = Some(Rc::clone(&app)));
 
     unsafe {
-        let _ = InitCommonControlsEx(&INITCOMMONCONTROLSEX {
-            dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_HOTKEY_CLASS | ICC_STANDARD_CLASSES,
-        });
         let hinst: HINSTANCE = GetModuleHandleW(None)?.into();
 
         let main_class = WNDCLASSW {
@@ -171,21 +168,11 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
             ..Default::default()
         };
         RegisterClassW(&main_class);
-        let dlg_class = WNDCLASSW {
-            lpfnWndProc: Some(dialog_wndproc),
-            hInstance: hinst,
-            lpszClassName: w!("DiscordClipHotkeyDialog"),
-            hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as usize as *mut c_void),
-            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            ..Default::default()
-        };
-        RegisterClassW(&dlg_class);
 
         app.taskbar_created.set(RegisterWindowMessageW(w!("TaskbarCreated")));
         let size = GetSystemMetrics(SM_CXSMICON).max(16);
         app.icon_active.set(make_icon(size, (0x58, 0x65, 0xF2))); // Discord blurple
         app.icon_idle.set(make_icon(size, (0x80, 0x84, 0x8E)));
-        app.font.set(message_font());
 
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -210,7 +197,7 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
         let warnings = app.startup_warnings.join("\n");
         if !warnings.is_empty() {
             notify(&app, "Discord Clip: check your settings", &warnings, true);
-        } else if app.hotkey_registered.get() {
+        } else if app.hotkey_registered.get() && !app.open_window {
             let cfg = app.cfg.borrow().clone();
             notify(
                 &app,
@@ -219,13 +206,12 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
                 false,
             );
         }
+        if app.open_window {
+            ui::open(snapshot(&app));
+        }
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-            let dlg = app.hotkey_dialog.get();
-            if !dlg.is_invalid() && IsDialogMessageW(dlg, &msg).as_bool() {
-                continue;
-            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -234,7 +220,6 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
         for icon in [app.icon_active.get(), app.icon_idle.get()] {
             let _ = DestroyIcon(icon);
         }
-        let _ = DeleteObject(app.font.get());
     }
 
     APP.with(|a| *a.borrow_mut() = None);
@@ -248,16 +233,22 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
     match msg {
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => save_clip(&app),
         WM_TRAY => match lparam.0 as u32 & 0xFFFF {
-            WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(&app),
+            WM_LBUTTONUP => ui::open(snapshot(&app)),
+            WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(&app),
             NIN_BALLOONUSERCLICK => show_last_clip(&app),
             _ => {}
         },
-        WM_STATUS => tray_update(&app),
-        WM_DESTROY => {
-            let dlg = app.hotkey_dialog.get();
-            if !dlg.is_invalid() {
-                let _ = DestroyWindow(dlg);
+        WM_STATUS => {
+            tray_update(&app);
+            ui::publish(snapshot(&app));
+        }
+        WM_UI_COMMAND => {
+            for cmd in ui::take_commands() {
+                handle_ui_command(&app, cmd);
             }
+            ui::publish(snapshot(&app));
+        }
+        WM_DESTROY => {
             unregister_hotkey(&app);
             tray_remove(&app);
             PostQuitMessage(0);
@@ -320,7 +311,7 @@ fn tray_nid(app: &App) -> NOTIFYICONDATAW {
     let short = if active { "Discord: capturing" } else { "Discord: waiting" };
     copy_wide(
         &mut nid.szTip,
-        &format!("Discord Clip\n{} saves the last {}s\n{short}", cfg.hotkey, cfg.seconds),
+        &format!("Discord Clip\n{} saves the last {}s\n{short}", cfg.hotkey, app.running_seconds),
     );
     nid
 }
@@ -360,8 +351,18 @@ fn notify(app: &App, title: &str, text: &str, warning: bool) {
     }
 }
 
-/// Draws the tray icon: a filled circle in `rgb` with a white waveform.
-fn make_icon(size: i32, rgb: (u8, u8, u8)) -> HICON {
+/// The app icon as top-down RGBA pixels (for the settings window).
+pub fn icon_rgba(size: i32, rgb: (u8, u8, u8)) -> Vec<u8> {
+    let mut px = icon_bgra(size, rgb);
+    for p in px.chunks_exact_mut(4) {
+        p.swap(0, 2);
+    }
+    px
+}
+
+/// Draws the app icon, a filled circle in `rgb` with a white waveform, as
+/// top-down BGRA pixels with straight alpha.
+fn icon_bgra(size: i32, rgb: (u8, u8, u8)) -> Vec<u8> {
     const SS: usize = 4; // supersampling per axis
     const BARS: [(f32, f32); 5] = [(8.5, 3.5), (12.25, 7.0), (16.0, 10.0), (19.75, 7.0), (23.5, 3.5)];
     let scale = 32.0 / size as f32;
@@ -394,7 +395,11 @@ fn make_icon(size: i32, rgb: (u8, u8, u8)) -> HICON {
             px[i + 3] = (255.0 * circle as f32 / (SS * SS) as f32).round() as u8;
         }
     }
+    px
+}
 
+fn make_icon(size: i32, rgb: (u8, u8, u8)) -> HICON {
+    let px = icon_bgra(size, rgb);
     unsafe {
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -435,10 +440,7 @@ fn make_icon(size: i32, rgb: (u8, u8, u8)) -> HICON {
 
 fn show_menu(app: &App) {
     let (discord, _) = discord_line(app);
-    let (hotkey, folder) = {
-        let cfg = app.cfg.borrow();
-        (cfg.hotkey.to_string(), cfg.out_dir.display().to_string())
-    };
+    let hotkey = app.cfg.borrow().hotkey.to_string();
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let item = |flags: MENU_ITEM_FLAGS, id: usize, text: &str| {
@@ -450,17 +452,14 @@ fn show_menu(app: &App) {
         item(MF_STRING | MF_GRAYED, 0, &discord);
         item(MF_STRING | MF_GRAYED, 0, &format!("Microphone: {}", app.mic_status));
         sep();
+        item(MF_STRING, ID_WINDOW, "Open Discord Clip");
+        sep();
         item(MF_STRING, ID_SAVE, &format!("Save clip now\t{hotkey}"));
         item(MF_STRING, ID_OPEN_FOLDER, "Open clips folder");
-        sep();
-        item(MF_STRING, ID_HOTKEY, &format!("Change hotkey...\t{hotkey}"));
-        item(MF_STRING, ID_FOLDER, &format!("Change clips folder...\t{}", shorten(&folder, 40)));
-        item(MF_STRING, ID_SETTINGS, "Edit settings file...");
-        item(MF_STRING, ID_RELOAD, "Reload settings");
         item(MF_STRING, ID_LOG, "Open log");
         sep();
         item(MF_STRING, ID_QUIT, "Quit");
-        let _ = SetMenuDefaultItem(menu, ID_SAVE as u32, 0);
+        let _ = SetMenuDefaultItem(menu, ID_WINDOW as u32, 0);
 
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -483,40 +482,11 @@ fn show_menu(app: &App) {
     }
 }
 
-fn shorten(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_string()
-    } else {
-        let tail: String = chars[chars.len() - (max - 3)..].iter().collect();
-        format!("...{tail}")
-    }
-}
-
 fn handle_command(app: &App, cmd: usize) {
     match cmd {
+        ID_WINDOW => ui::open(snapshot(app)),
         ID_SAVE => save_clip(app),
-        ID_OPEN_FOLDER => {
-            let dir = app.cfg.borrow().out_dir.clone();
-            let _ = std::fs::create_dir_all(&dir);
-            shell_open(&dir);
-        }
-        ID_HOTKEY => open_hotkey_dialog(app),
-        ID_FOLDER => change_folder(app),
-        ID_SETTINGS => {
-            let path = config::config_path();
-            if !path.exists() {
-                if let Err(e) = app.file_cfg.borrow().save(&path) {
-                    log!("couldn't create settings file: {e:#}");
-                }
-            }
-            shell_open(&path);
-            notify(app, "Editing settings", "Save the file, then choose \"Reload settings\" from the tray menu.", false);
-        }
-        ID_RELOAD => {
-            log!("reloading settings");
-            quit(app, Exit::Reload);
-        }
+        ID_OPEN_FOLDER => open_clips_folder(app),
         ID_LOG => shell_open(&log::log_path()),
         ID_QUIT => {
             log!("quit requested");
@@ -524,6 +494,96 @@ fn handle_command(app: &App, cmd: usize) {
         }
         _ => {}
     }
+}
+
+fn open_clips_folder(app: &App) {
+    let dir = app.cfg.borrow().out_dir.clone();
+    let _ = std::fs::create_dir_all(&dir);
+    shell_open(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Settings window
+// ---------------------------------------------------------------------------
+
+fn snapshot(app: &App) -> Snapshot {
+    let (discord, discord_active) = discord_line(app);
+    let cfg = app.cfg.borrow().clone();
+    Snapshot {
+        restart_needed: cfg.seconds != app.running_seconds || cfg.mic != app.running_mic,
+        cfg,
+        discord: discord.trim_start_matches("Discord: ").to_string(),
+        discord_active,
+        mic: app.mic_status.clone(),
+        hotkey_registered: app.hotkey_registered.get(),
+        hotkey_error: app.hotkey_error.borrow().clone(),
+    }
+}
+
+fn handle_ui_command(app: &App, cmd: Command) {
+    match cmd {
+        Command::BeginHotkeyCapture => {
+            // While picking, the current hotkey must not fire (or be swallowed).
+            *app.hotkey_error.borrow_mut() = None;
+            unregister_hotkey(app);
+        }
+        Command::EndHotkeyCapture(None) => register_hotkey(app),
+        Command::EndHotkeyCapture(Some(new)) => change_hotkey(app, new),
+        Command::SetSeconds(s) => match config::validate_seconds(s) {
+            Ok(s) => {
+                update_settings(app, |c| c.seconds = s);
+                log!("clip length set to {s}s (applies after restart)");
+            }
+            Err(e) => log!("ignoring clip length {s}: {e:#}"),
+        },
+        Command::SetMic(on) => {
+            update_settings(app, |c| c.mic = on);
+            log!("microphone set to {on} (applies after restart)");
+        }
+        Command::SetMicGain(g) => update_settings(app, |c| c.mic_gain = g.clamp(0.0, 10.0)),
+        Command::SetClipboard(on) => update_settings(app, |c| c.clipboard = on),
+        Command::SetNotifications(on) => update_settings(app, |c| c.notifications = on),
+        Command::PickFolder => change_folder(app),
+        Command::OpenFolder => open_clips_folder(app),
+        Command::OpenLog => shell_open(&log::log_path()),
+        Command::OpenConfigFile => {
+            let path = config::config_path();
+            if !path.exists() {
+                if let Err(e) = app.file_cfg.borrow().save(&path) {
+                    log!("couldn't create settings file: {e:#}");
+                }
+            }
+            shell_open(&path);
+        }
+        Command::Restart => {
+            log!("restarting to apply settings");
+            quit(app, Exit::Restart);
+        }
+    }
+}
+
+fn change_hotkey(app: &App, new: Hotkey) {
+    let old = app.cfg.borrow().hotkey;
+    if new == old {
+        register_hotkey(app);
+        return;
+    }
+    if let Err(e) = new.check_sensible() {
+        *app.hotkey_error.borrow_mut() = Some(e);
+        register_hotkey(app);
+        return;
+    }
+    if !try_register(app, new) {
+        log!("hotkey {new} is already in use by another app");
+        *app.hotkey_error.borrow_mut() =
+            Some(format!("{new} is already used by another app. Pick a different combination."));
+        register_hotkey(app);
+        return;
+    }
+    app.hotkey_registered.set(true);
+    update_settings(app, |c| c.hotkey = new);
+    log!("hotkey changed to {new}");
+    tray_update(app);
 }
 
 fn save_clip(app: &App) {
@@ -600,7 +660,7 @@ fn register_hotkey(app: &App) {
         notify(
             app,
             "Hotkey unavailable",
-            &format!("{hk} is already used by another app.\nRight-click the tray icon and choose \"Change hotkey...\"."),
+            &format!("{hk} is already used by another app.\nClick the tray icon to pick a different one."),
             true,
         );
     }
@@ -625,207 +685,13 @@ fn update_settings(app: &App, f: impl Fn(&mut Config)) {
 }
 
 // ---------------------------------------------------------------------------
-// Hotkey dialog
-// ---------------------------------------------------------------------------
-
-fn scale(v: i32) -> i32 {
-    let dpi = unsafe { GetDpiForSystem() } as i32;
-    v * dpi.max(96) / 96
-}
-
-fn message_font() -> HFONT {
-    unsafe {
-        let mut ncm = NONCLIENTMETRICSW {
-            cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
-            ..Default::default()
-        };
-        if SystemParametersInfoW(
-            SPI_GETNONCLIENTMETRICS,
-            ncm.cbSize,
-            Some(&mut ncm as *mut _ as *mut c_void),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-        .is_ok()
-        {
-            CreateFontIndirectW(&ncm.lfMessageFont)
-        } else {
-            HFONT::default()
-        }
-    }
-}
-
-fn open_hotkey_dialog(app: &App) {
-    unsafe {
-        let existing = app.hotkey_dialog.get();
-        if !existing.is_invalid() {
-            let _ = SetForegroundWindow(existing);
-            return;
-        }
-        // While picking, the current hotkey must not fire (or be swallowed).
-        unregister_hotkey(app);
-
-        let Ok(hinst) = GetModuleHandleW(None) else { return };
-        let hinst: HINSTANCE = hinst.into();
-        let (cw, ch) = (scale(380), scale(150));
-        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
-        let ex = WS_EX_DLGMODALFRAME | WS_EX_TOPMOST | WS_EX_CONTROLPARENT;
-        let mut rc = RECT { left: 0, top: 0, right: cw, bottom: ch };
-        let _ = AdjustWindowRectEx(&mut rc, style, false, ex);
-        let (ww, wh) = (rc.right - rc.left, rc.bottom - rc.top);
-        let x = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2;
-        let y = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
-
-        let Ok(dlg) = CreateWindowExW(
-            ex,
-            w!("DiscordClipHotkeyDialog"),
-            w!("Discord Clip - Change hotkey"),
-            style,
-            x,
-            y,
-            ww,
-            wh,
-            None,
-            None,
-            hinst,
-            None,
-        ) else {
-            register_hotkey(app);
-            return;
-        };
-        app.hotkey_dialog.set(dlg);
-
-        let current = app.cfg.borrow().hotkey;
-        let font = app.font.get();
-        let child = |class: PCWSTR, text: &str, style: WINDOW_STYLE, id: i32, x: i32, y: i32, w: i32, h: i32| {
-            let h = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                class,
-                &HSTRING::from(text),
-                WS_CHILD | WS_VISIBLE | style,
-                scale(x),
-                scale(y),
-                scale(w),
-                scale(h),
-                dlg,
-                HMENU(id as isize as *mut c_void),
-                hinst,
-                None,
-            )
-            .unwrap_or_default();
-            if !font.is_invalid() {
-                SendMessageW(h, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
-            }
-            h
-        };
-        child(w!("STATIC"), "Click the box and press the key combination you want:", WINDOW_STYLE(0), -1, 14, 14, 352, 20);
-        let hk = child(w!("msctls_hotkey32"), "", WS_TABSTOP | WS_BORDER, IDC_HOTKEY, 14, 38, 352, 26);
-        child(
-            w!("STATIC"),
-            &format!("Current: {current}. Use Ctrl, Alt or Shift+key, or an F-key on its own."),
-            WINDOW_STYLE(0),
-            IDC_INFO,
-            14,
-            72,
-            352,
-            34,
-        );
-        child(w!("BUTTON"), "OK", WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32), IDOK, 196, 112, 80, 28);
-        child(w!("BUTTON"), "Cancel", WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32), IDCANCEL, 286, 112, 80, 28);
-
-        let mut flags = 0;
-        if current.mods & MOD_SHIFT != 0 {
-            flags |= HOTKEYF_SHIFT;
-        }
-        if current.mods & MOD_CONTROL != 0 {
-            flags |= HOTKEYF_CONTROL;
-        }
-        if current.mods & MOD_ALT != 0 {
-            flags |= HOTKEYF_ALT;
-        }
-        SendMessageW(hk, HKM_SETHOTKEY, WPARAM(((flags << 8) | (current.vk & 0xFF)) as usize), LPARAM(0));
-
-        let _ = ShowWindow(dlg, SW_SHOW);
-        let _ = SetForegroundWindow(dlg);
-        let _ = SetFocus(hk);
-    }
-}
-
-unsafe extern "system" fn dialog_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let Some(app) = app() else {
-        return DefWindowProcW(hwnd, msg, wparam, lparam);
-    };
-    match msg {
-        WM_COMMAND => match (wparam.0 & 0xFFFF) as i32 {
-            IDOK => hotkey_dialog_ok(&app, hwnd),
-            IDCANCEL => {
-                let _ = DestroyWindow(hwnd);
-            }
-            _ => {}
-        },
-        WM_CLOSE => {
-            let _ = DestroyWindow(hwnd);
-        }
-        WM_DESTROY => {
-            app.hotkey_dialog.set(HWND::default());
-            // Cancelled (or failed): put the old hotkey back.
-            register_hotkey(&app);
-        }
-        _ => return DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-    LRESULT(0)
-}
-
-fn hotkey_dialog_ok(app: &App, dlg: HWND) {
-    unsafe {
-        let set_info = |text: &str| {
-            if let Ok(info) = GetDlgItem(dlg, IDC_INFO) {
-                let _ = SetWindowTextW(info, &HSTRING::from(text));
-            }
-        };
-        let Ok(hk_ctl) = GetDlgItem(dlg, IDC_HOTKEY) else { return };
-        let v = SendMessageW(hk_ctl, HKM_GETHOTKEY, WPARAM(0), LPARAM(0)).0 as u32;
-        let vk = v & 0xFF;
-        let f = (v >> 8) & 0xFF;
-        if vk == 0 {
-            set_info("Press a key combination in the box first.");
-            return;
-        }
-        let mut mods = 0;
-        if f & HOTKEYF_SHIFT != 0 {
-            mods |= MOD_SHIFT;
-        }
-        if f & HOTKEYF_CONTROL != 0 {
-            mods |= MOD_CONTROL;
-        }
-        if f & HOTKEYF_ALT != 0 {
-            mods |= MOD_ALT;
-        }
-        let new = Hotkey { mods, vk };
-        if let Err(e) = new.check_sensible() {
-            set_info(&e);
-            return;
-        }
-        if !try_register(app, new) {
-            set_info(&format!("{new} is already used by another app. Pick a different combination."));
-            return;
-        }
-        app.hotkey_registered.set(true);
-        update_settings(app, |c| c.hotkey = new);
-        log!("hotkey changed to {new}");
-        let _ = DestroyWindow(dlg);
-        tray_update(app);
-        let secs = app.cfg.borrow().seconds;
-        notify(app, "Hotkey changed", &format!("Press {new} to save the last {secs}s."), false);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Clips folder picker
 // ---------------------------------------------------------------------------
 
 fn change_folder(app: &App) {
     let current = app.cfg.borrow().out_dir.clone();
-    match pick_folder(app.hwnd.get(), &current) {
+    let owner = ui::window_hwnd().unwrap_or(app.hwnd.get());
+    match pick_folder(owner, &current) {
         Ok(Some(dir)) => {
             if let Err(e) = std::fs::create_dir_all(&dir) {
                 notify(app, "Can't use that folder", &format!("{e}"), true);
@@ -833,7 +699,7 @@ fn change_folder(app: &App) {
             }
             update_settings(app, |c| c.out_dir = dir.clone());
             log!("clips folder changed to {}", dir.display());
-            notify(app, "Clips folder changed", &format!("Clips will be saved in\n{}", dir.display()), false);
+            ui::publish(snapshot(app));
         }
         Ok(None) => {}
         Err(e) => {
