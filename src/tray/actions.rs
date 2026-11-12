@@ -47,7 +47,13 @@ pub(super) fn save_clip(app: &App) {
 }
 
 pub(super) fn show_last_clip(app: &App) {
-    let Some(path) = app.last_clip.borrow().clone() else { return };
+    if let Some(path) = app.last_clip.borrow().clone() {
+        show_in_folder(&path);
+    }
+}
+
+/// Opens Explorer with `path` selected.
+pub(super) fn show_in_folder(path: &Path) {
     let args = HSTRING::from(format!("/select,\"{}\"", path.display()));
     unsafe {
         ShellExecuteW(None, w!("open"), w!("explorer.exe"), &args, PCWSTR::null(), SW_SHOWNORMAL);

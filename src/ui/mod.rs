@@ -9,8 +9,9 @@
 //!
 //! * `theme` / `widgets`: Discord's look and the controls built on it
 //! * `sidebar`: page list and status panel
-//! * `settings` (+ `keybind`), `updates`: the pages
+//! * `clips`, `settings` (+ `keybind`), `updates`: the pages
 
+mod clips;
 mod keybind;
 mod settings;
 mod sidebar;
@@ -19,6 +20,7 @@ mod updates;
 mod widgets;
 
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -62,6 +64,12 @@ pub enum Command {
     InstallUpdate,
     /// Open an https link in the browser.
     OpenUrl(String),
+    /// Copy a clip to the clipboard (to paste into Discord).
+    CopyClip(PathBuf),
+    /// Show a clip in Explorer.
+    ShowClip(PathBuf),
+    /// Move a clip to the Recycle Bin.
+    DeleteClip(PathBuf),
 }
 
 /// Everything the window shows, published by the tray thread.
@@ -191,17 +199,19 @@ fn run_window() -> eframe::Result {
 // The window
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Page {
+    Clips,
     Settings,
     Updates,
 }
 
 impl Page {
-    const ALL: [Page; 2] = [Page::Settings, Page::Updates];
+    const ALL: [Page; 3] = [Page::Clips, Page::Settings, Page::Updates];
 
     fn title(self) -> &'static str {
         match self {
+            Page::Clips => "Clips",
             Page::Settings => "Settings",
             Page::Updates => "Updates",
         }
@@ -216,6 +226,7 @@ struct Icons {
 
 struct ClipWindow {
     page: Page,
+    clips: clips::ClipsPage,
     settings: settings::SettingsPage,
     icons: Icons,
 }
@@ -239,7 +250,8 @@ impl ClipWindow {
             cc.egui_ctx.load_texture(name, img, egui::TextureOptions::LINEAR)
         };
         ClipWindow {
-            page: Page::Settings,
+            page: Page::Clips,
+            clips: clips::ClipsPage::default(),
             settings: settings::SettingsPage::default(),
             icons: Icons { active: texture("icon-active", BLURPLE_RGB), idle: texture("icon-idle", IDLE_RGB) },
         }
@@ -248,6 +260,7 @@ impl ClipWindow {
     /// Closing only hides the window (winit can't create a second event loop).
     fn hide(&mut self) {
         self.settings.keybind.stop(None);
+        self.clips.stop();
         if let Some(hwnd) = window_hwnd() {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
@@ -304,10 +317,12 @@ impl eframe::App for ClipWindow {
             if snap.restart_needed {
                 settings::restart_bar(ui);
             }
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            // Each page keeps its own scroll position.
+            egui::ScrollArea::vertical().id_salt(self.page).auto_shrink(false).show(ui, |ui| {
                 Frame::new().inner_margin(Margin { left: 40, right: 40, top: 40, bottom: 40 }).show(ui, |ui| {
                     ui.set_max_width(ui.available_width().min(700.0));
                     match self.page {
+                        Page::Clips => self.clips.show(ui, &snap),
                         Page::Settings => self.settings.show(ui, &snap),
                         Page::Updates => updates::show(ui, &snap, &self.icons.active),
                     }
