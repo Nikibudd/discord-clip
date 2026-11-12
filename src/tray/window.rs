@@ -13,7 +13,7 @@ use windows::Win32::UI::Shell::{
     FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
 };
 
-use super::actions::{open_clips_folder, shell_open};
+use super::actions::{open_clips_folder, shell_open, show_in_folder};
 use super::global_hotkey::{change_hotkey, unregister_hotkey, register_hotkey};
 use super::notify_icon::{discord_line, notify, notify_always};
 use super::{quit, App, Balloon, Exit};
@@ -115,6 +115,20 @@ pub(super) fn handle_ui_command(app: &App, cmd: Command) {
                 shell_open(Path::new(&url));
             }
         }
+        Command::CopyClip(path) => {
+            if let Err(e) = crate::clip::copy_file_to_clipboard(&path) {
+                log!("clipboard copy failed: {e:#}");
+                notify(app, "Couldn't copy the clip", &format!("{e:#}"), true);
+            }
+        }
+        Command::ShowClip(path) => show_in_folder(&path),
+        Command::DeleteClip(path) => match crate::library::recycle(&path) {
+            Ok(()) => log!("moved {} to the Recycle Bin", path.display()),
+            Err(e) => {
+                log!("{e:#}");
+                notify(app, "Couldn't delete the clip", &format!("{e:#}"), true);
+            }
+        },
     }
 }
 
