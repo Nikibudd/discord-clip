@@ -69,3 +69,4 @@ if ($LASTEXITCODE -eq 0) {
 
 Set-Output 'version' $version
 Write-Summary ":rocket: Merging this PR publishes **v$version** (``Release: $request``, latest release: $latest)."
+exit 0
