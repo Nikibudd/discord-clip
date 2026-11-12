@@ -83,9 +83,11 @@ pub enum State {
 pub struct Status {
     pub state: State,
     pub last_checked: Option<SystemTime>,
+    /// Set on the first start after an update: the version we came from.
+    pub updated_from: Option<String>,
 }
 
-static STATUS: Mutex<Status> = Mutex::new(Status { state: State::Idle, last_checked: None });
+static STATUS: Mutex<Status> = Mutex::new(Status { state: State::Idle, last_checked: None, updated_from: None });
 /// A check or download is running.
 static BUSY: AtomicBool = AtomicBool::new(false);
 /// Automatic checks enabled (the `check_updates` setting).
@@ -147,7 +149,14 @@ pub fn note_version() -> Option<String> {
         let _ = std::fs::create_dir_all(crate::config::app_dir());
         let _ = std::fs::write(&path, CURRENT);
     }
-    previous.filter(|p| is_newer(CURRENT, p))
+    let updated_from = previous.filter(|p| is_newer(CURRENT, p));
+    STATUS.lock().unwrap().updated_from = updated_from.clone();
+    updated_from
+}
+
+/// Release notes of the version we're running.
+pub fn current_notes_url() -> String {
+    format!("{RELEASES_URL}/tag/v{CURRENT}")
 }
 
 // ---------------------------------------------------------------------------
