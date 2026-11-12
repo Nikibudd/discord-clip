@@ -199,7 +199,7 @@ mod tests {
         // Switched off in Task Manager: 03 + timestamp.
         let disabled = [3u8, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
         unsafe {
-            RegSetKeyValueW(
+            let _ = RegSetKeyValueW(
                 HKEY_CURRENT_USER,
                 APPROVED_KEY,
                 VALUE,

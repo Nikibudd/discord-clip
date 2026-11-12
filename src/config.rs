@@ -13,6 +13,8 @@ pub struct Config {
     pub seconds: u32,
     pub mic: bool,
     pub mic_gain: f32,
+    /// Microphone endpoint id; empty = default communications device.
+    pub mic_device: String,
     pub out_dir: PathBuf,
     pub clipboard: bool,
     pub notifications: bool,
@@ -26,6 +28,7 @@ impl Default for Config {
             seconds: 30,
             mic: true,
             mic_gain: 1.0,
+            mic_device: String::new(),
             out_dir: default_out_dir(),
             clipboard: true,
             notifications: true,
@@ -124,6 +127,7 @@ impl Config {
                 self.seconds = validate_seconds(v.parse().context("seconds must be a whole number")?)?
             }
             "mic" => self.mic = parse_bool(key, v)?,
+            "mic_device" => self.mic_device = v.to_string(),
             "mic_gain" => {
                 let g: f32 = v.parse().context("mic_gain must be a number")?;
                 if !(0.0..=10.0).contains(&g) {
@@ -178,6 +182,10 @@ mic = {}
 # Microphone volume multiplier (0-10)
 mic_gain = {}
 
+# Microphone to record (pick it in the app). Empty = Windows' default
+# communications microphone.
+mic_device = {}
+
 # Folder clips are saved in
 out_dir = {}
 
@@ -194,6 +202,7 @@ check_updates = {}
             self.seconds,
             self.mic,
             self.mic_gain,
+            self.mic_device,
             self.out_dir.display(),
             self.clipboard,
             self.notifications,
@@ -237,6 +246,7 @@ mod tests {
         cfg.seconds = 45;
         cfg.mic = false;
         cfg.mic_gain = 1.5;
+        cfg.mic_device = "{0.0.1.00000000}.{8d2f5c8e-1b2a-4c3d-9e8f-123456789abc}".into();
         cfg.out_dir = PathBuf::from(r"D:\Clips Here");
         cfg.clipboard = false;
         cfg.notifications = false;
