@@ -160,3 +160,107 @@ pub fn ago(t: std::time::SystemTime) -> String {
     }
 }
 
+
+/// Discord's select: a box showing the current choice with a chevron; click
+/// it to open the list underneath. Returns the box's response (e.g. to
+/// refresh the options when it opens) and the option picked this frame.
+pub fn dropdown(
+    ui: &mut Ui,
+    id_salt: &str,
+    options: &[String],
+    selected: Option<usize>,
+    enabled: bool,
+) -> (egui::Response, Option<usize>) {
+    let id = ui.make_persistent_id(id_salt);
+    let mut open = enabled && ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), sense);
+    let resp = if enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
+    if resp.clicked() {
+        open = !open;
+    }
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(4), BG_TERTIARY);
+    if open {
+        painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, BLURPLE), egui::StrokeKind::Inside);
+    } else if resp.hovered() {
+        painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, BG_FLOATING), egui::StrokeKind::Inside);
+    }
+    let label = selected.and_then(|i| options.get(i)).map(String::as_str).unwrap_or("");
+    let color = if enabled { TEXT_NORMAL } else { TEXT_MUTED };
+    let text_rect = Rect::from_min_max(rect.min + vec2(12.0, 0.0), rect.max - vec2(36.0, 0.0));
+    let galley = one_line(ui, label, font(15.0, Weight::Regular), color, text_rect.width());
+    painter.galley(pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0), galley, color);
+    chevron(painter, pos2(rect.right() - 18.0, rect.center().y), open, color);
+
+    let mut picked = None;
+    if open {
+        let popup = egui::Area::new(id.with("popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_bottom() + vec2(0.0, 4.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::new()
+                    .fill(BG_SECONDARY_ALT)
+                    .stroke(Stroke::new(1.0, BG_FLOATING))
+                    .corner_radius(CornerRadius::same(4))
+                    .inner_margin(egui::Margin::same(4))
+                    .show(ui, |ui| {
+                        ui.set_width(rect.width() - 8.0);
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        for (i, option) in options.iter().enumerate() {
+                            let (r, row) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+                            let is_selected = selected == Some(i);
+                            let fill = if row.hovered() {
+                                BG_HOVER
+                            } else if is_selected {
+                                BG_SELECTED
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+                            ui.painter().rect_filled(r, CornerRadius::same(3), fill);
+                            let color = if is_selected || row.hovered() { Color32::WHITE } else { TEXT_NORMAL };
+                            let galley = one_line(ui, option, font(15.0, Weight::Regular), color, r.width() - 44.0);
+                            ui.painter().galley(pos2(r.left() + 10.0, r.center().y - galley.size().y / 2.0), galley, color);
+                            if is_selected {
+                                // Blurple circle with a check, like Discord's selected option.
+                                let c = pos2(r.right() - 18.0, r.center().y);
+                                ui.painter().circle_filled(c, 8.0, BLURPLE);
+                                let s = Stroke::new(1.8, Color32::WHITE);
+                                ui.painter().line_segment([c + vec2(-3.5, 0.0), c + vec2(-1.0, 2.5)], s);
+                                ui.painter().line_segment([c + vec2(-1.0, 2.5), c + vec2(3.5, -2.5)], s);
+                            }
+                            if row.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                picked = Some(i);
+                            }
+                        }
+                    });
+            });
+        // Close on a pick, or a click anywhere outside the box and the list.
+        if picked.is_some() || (popup.response.clicked_elsewhere() && !resp.clicked() && ui.input(|i| i.pointer.any_click())) {
+            open = false;
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(id, open));
+    (resp, picked)
+}
+
+/// A single line of text, cut off with "…" if wider than `max_width`.
+fn one_line(ui: &Ui, text: &str, font: egui::FontId, color: Color32, max_width: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);
+    job.wrap = egui::text::TextWrapping {
+        max_width: max_width.max(10.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    ui.painter().layout_job(job)
+}
+
+/// A small down (or, when open, up) chevron.
+fn chevron(painter: &egui::Painter, c: egui::Pos2, up: bool, color: Color32) {
+    let dy = if up { -2.5 } else { 2.5 };
+    let s = Stroke::new(2.0, color);
+    painter.line_segment([c + vec2(-5.0, -dy), c + vec2(0.0, dy)], s);
+    painter.line_segment([c + vec2(0.0, dy), c + vec2(5.0, -dy)], s);
+}

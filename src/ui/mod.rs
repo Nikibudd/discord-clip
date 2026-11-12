@@ -49,6 +49,10 @@ pub enum Command {
     EndHotkeyCapture(Option<Hotkey>),
     SetSeconds(u32),
     SetMic(bool),
+    /// Microphone endpoint id; empty = default communications device.
+    SetMicDevice(String),
+    /// Re-read the list of microphones (the picker was opened).
+    RefreshMics,
     SetMicGain(f32),
     SetClipboard(bool),
     SetNotifications(bool),
@@ -81,12 +85,15 @@ pub struct Snapshot {
     /// e.g. "Capturing Discord.exe (pid 1234)".
     pub discord: String,
     pub discord_active: bool,
-    /// "on", "off" or "unavailable".
+    /// "on", "off", "unavailable", or "fallback" (the picked mic isn't
+    /// connected, so the default one is recorded).
     pub mic: String,
     pub hotkey_registered: bool,
     pub hotkey_error: Option<String>,
     /// Clip length or microphone changed; they apply after a restart.
     pub restart_needed: bool,
+    /// Capture devices for the microphone picker.
+    pub mics: Vec<crate::capture::Mic>,
     pub update: crate::update::Status,
     /// Installed copy (updates via installer) rather than a portable exe.
     pub installed: bool,
@@ -281,6 +288,7 @@ fn set(cmd: Command) {
         match &cmd {
             Command::SetSeconds(s) => snap.cfg.seconds = *s,
             Command::SetMic(m) => snap.cfg.mic = *m,
+            Command::SetMicDevice(id) => snap.cfg.mic_device = id.clone(),
             Command::SetMicGain(g) => snap.cfg.mic_gain = *g,
             Command::SetClipboard(c) => snap.cfg.clipboard = *c,
             Command::SetNotifications(n) => snap.cfg.notifications = *n,

@@ -73,11 +73,14 @@ impl SettingsPage {
         let mic_desc = if snap.mic == "unavailable" {
             "Mix your own voice into clips. No microphone was found when the app started."
         } else {
-            "Mix your own voice (your default communications microphone) into clips. Applies after a restart."
+            "Mix your own voice into clips. Applies after a restart."
         };
         if row(ui, "Record my microphone", mic_desc, |ui| toggle(ui, cfg.mic)).clicked() {
             set(Command::SetMic(!cfg.mic));
         }
+
+        ui.add_space(24.0);
+        mic_picker(ui, snap);
 
         ui.add_space(24.0);
         let mut gain = self.gain_drag.unwrap_or(cfg.mic_gain.min(4.0));
@@ -218,7 +221,7 @@ pub fn restart_bar(ui: &mut Ui) {
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                             text(
                                 ui,
-                                "Restart to apply your clip length and microphone changes.",
+                                "Restart to apply your recording changes.",
                                 15.0,
                                 Weight::Semibold,
                                 TEXT_NORMAL,
@@ -227,4 +230,45 @@ pub fn restart_bar(ui: &mut Ui) {
                     });
                 });
         });
+}
+
+/// Which microphone to record: Windows' default communications device, or
+/// a specific one (kept even while it's unplugged).
+fn mic_picker(ui: &mut Ui, snap: &Snapshot) {
+    let cfg = &snap.cfg;
+    text(ui, "Microphone", 16.0, Weight::Semibold, HEADER_PRIMARY);
+    ui.add_space(4.0);
+    let (desc, color) = if snap.mic == "fallback" {
+        ("The selected microphone isn't connected, so your default communications microphone is recorded instead.", YELLOW)
+    } else {
+        ("The mic you talk into on Discord. Applies after a restart.", HEADER_SECONDARY)
+    };
+    text(ui, desc, 14.0, Weight::Regular, color);
+    ui.add_space(8.0);
+
+    let default_name = snap.mics.iter().find(|m| m.is_default).map(|m| m.name.as_str());
+    let mut options = vec![match default_name {
+        Some(name) => format!("Default communications device ({name})"),
+        None => "Default communications device".to_string(),
+    }];
+    let mut ids = vec![String::new()];
+    for m in &snap.mics {
+        options.push(m.name.clone());
+        ids.push(m.id.clone());
+    }
+    if !cfg.mic_device.is_empty() && !ids.contains(&cfg.mic_device) {
+        options.push("Selected microphone (not connected)".to_string());
+        ids.push(cfg.mic_device.clone());
+    }
+    let selected = ids.iter().position(|id| *id == cfg.mic_device);
+    let (resp, picked) = dropdown(ui, "mic-device", &options, selected, cfg.mic);
+    if resp.clicked() {
+        // Pick up mics plugged in since the list was read.
+        send(Command::RefreshMics);
+    }
+    if let Some(i) = picked {
+        if Some(i) != selected {
+            set(Command::SetMicDevice(ids[i].clone()));
+        }
+    }
 }

@@ -25,7 +25,10 @@ pub(super) fn snapshot(app: &App) -> Snapshot {
     let (discord, discord_active) = discord_line(app);
     let cfg = app.cfg.borrow().clone();
     Snapshot {
-        restart_needed: cfg.seconds != app.running_seconds || cfg.mic != app.running_mic,
+        restart_needed: cfg.seconds != app.running_seconds
+            || cfg.mic != app.running_mic
+            || cfg.mic_device != app.running_mic_device,
+        mics: app.mics.borrow().clone(),
         cfg,
         discord: discord.trim_start_matches("Discord: ").to_string(),
         discord_active,
@@ -83,6 +86,11 @@ pub(super) fn handle_ui_command(app: &App, cmd: Command) {
             update_settings(app, |c| c.mic = on);
             log!("microphone set to {on} (applies after restart)");
         }
+        Command::SetMicDevice(id) => {
+            log!("microphone device set to {:?} (applies after restart)", if id.is_empty() { "default" } else { &id });
+            update_settings(app, |c| c.mic_device = id.clone());
+        }
+        Command::RefreshMics => refresh_mics(app),
         Command::SetMicGain(g) => update_settings(app, |c| c.mic_gain = g.clamp(0.0, 10.0)),
         Command::SetClipboard(on) => update_settings(app, |c| c.clipboard = on),
         Command::SetNotifications(on) => update_settings(app, |c| c.notifications = on),
@@ -196,5 +204,13 @@ pub(super) fn pick_folder(owner: HWND, current: &Path) -> anyhow::Result<Option<
         let path = name.to_string();
         CoTaskMemFree(Some(name.0 as *const c_void));
         Ok(Some(PathBuf::from(path?)))
+    }
+}
+
+/// Re-reads the capture devices for the microphone picker.
+pub(super) fn refresh_mics(app: &App) {
+    match crate::capture::list_microphones() {
+        Ok(mics) => *app.mics.borrow_mut() = mics,
+        Err(e) => log!("couldn't list microphones: {e:#}"),
     }
 }

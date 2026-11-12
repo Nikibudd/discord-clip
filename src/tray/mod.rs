@@ -103,6 +103,9 @@ pub struct App {
     /// changing them needs a restart.
     running_seconds: u32,
     running_mic: bool,
+    running_mic_device: String,
+    /// Capture devices for the microphone picker (refreshed on demand).
+    mics: RefCell<Vec<crate::capture::Mic>>,
     hwnd: Cell<HWND>,
     hotkey_registered: Cell<bool>,
     /// Why the last hotkey change from the window failed.
@@ -133,6 +136,8 @@ impl App {
         App {
             running_seconds: cfg.seconds,
             running_mic: cfg.mic,
+            running_mic_device: cfg.mic_device.clone(),
+            mics: RefCell::new(Vec::new()),
             cfg: RefCell::new(cfg),
             file_cfg: RefCell::new(file_cfg),
             discord_ring,
@@ -207,6 +212,7 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
 
         tray_add(&app);
         register_hotkey(&app);
+        window::refresh_mics(&app);
 
         let updated_from = crate::update::note_version();
         // First start after an update (from the window, or a newer installer

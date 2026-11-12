@@ -187,10 +187,23 @@ fn main() {
 
     let (mic_ring, mic_status) = if cfg.mic {
         let ring = Arc::new(RingBuffer::new(ring_len));
-        match capture::spawn(Source::Microphone, Arc::clone(&ring), Arc::clone(&running)) {
+        let chosen = Some(cfg.mic_device.clone()).filter(|id| !id.is_empty());
+        let mut status = "on";
+        let mut started = capture::spawn(Source::Microphone(chosen.clone()), Arc::clone(&ring), Arc::clone(&running));
+        if let (Err(e), Some(id)) = (&started, &chosen) {
+            // The picked mic is unplugged or gone: use the default for now
+            // (the setting is kept, so it's used again once it's back).
+            log!("microphone {id}: {e:#}; falling back to the default communications device");
+            status = "fallback";
+            started = capture::spawn(Source::Microphone(None), Arc::clone(&ring), Arc::clone(&running));
+        }
+        match started {
             Ok(_) => {
-                log!("microphone: capturing default communications device");
-                (Some(ring), "on".to_string())
+                match (&chosen, status) {
+                    (Some(id), "on") => log!("microphone: capturing {id}"),
+                    _ => log!("microphone: capturing default communications device"),
+                }
+                (Some(ring), status.to_string())
             }
             Err(e) => {
                 log!("microphone unavailable: {e:#}");

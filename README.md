@@ -7,7 +7,7 @@ you press the hotkey (**Ctrl+Alt+C** by default).
 - **Other people:** captured with per-process WASAPI loopback of the Discord
   client, so only Discord audio is recorded (no game/music/browser audio).
   Discord keeps playing to your speakers as normal.
-- **You:** your default *communications* microphone is mixed in.
+- **You:** your microphone is mixed in: by default Windows' default *communications* mic, or the one you pick in Settings.
 - The saved clip is copied to the clipboard as a file, so **Ctrl+V in a Discord
   chat** attaches it. A notification confirms it; click it to show the file.
 - Clips are 16-bit 48 kHz stereo: 30 s is about 5.8 MB, under Discord's 10 MB
@@ -30,7 +30,7 @@ window with a sidebar of pages. Closing it just hides it again.
   **Show** opens it in Explorer, **Delete** moves it to the Recycle Bin. New
   clips appear on their own.
 - **Settings**: hotkey recorder (combos already taken by another app are
-  rejected), clip length, microphone on/off and volume, clips folder,
+  rejected), clip length, microphone on/off, which mic (falls back to the default if it's unplugged) and its volume, clips folder,
   clipboard and notification toggles, **Start with Windows**, and buttons to open/reload
   `config.ini` and the log. Changes save immediately. Clip length and the
   microphone switch apply after a restart; a bar offers to do that for you.
@@ -75,6 +75,7 @@ hotkey = Ctrl+Alt+C          # e.g. Ctrl+Shift+F9, F9, Win+Alt+R, Ctrl+Numpad0
 seconds = 30                 # 1-300
 mic = true
 mic_gain = 1
+mic_device =                 # empty = default communications mic; set from the app
 out_dir = C:\Users\you\Music\Discord Clips   # full path; %USERPROFILE% etc. allowed
 clipboard = true
 notifications = true
