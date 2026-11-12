@@ -83,6 +83,11 @@ impl Playback {
         &self.path
     }
 
+    /// The file was renamed. Playback is unaffected (the samples are in memory).
+    pub fn set_path(&mut self, path: PathBuf) {
+        self.path = path;
+    }
+
     pub fn is_paused(&self) -> bool {
         self.paused
     }

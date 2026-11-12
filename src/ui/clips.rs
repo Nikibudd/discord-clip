@@ -48,6 +48,10 @@ pub struct ClipsPage {
     /// Deleted from the page; hidden until the next scan confirms it.
     deleted: HashSet<PathBuf>,
     toast: Option<(String, Instant)>,
+    /// Text in the search box.
+    search: String,
+    /// The clip whose name is being edited, and the text so far.
+    renaming: Option<(PathBuf, String)>,
 }
 
 enum Action {
@@ -58,6 +62,12 @@ enum Action {
     Copy,
     Show,
     Delete,
+    /// Clicked the title: start editing the name.
+    StartRename,
+    /// Enter / clicked away while editing.
+    FinishRename,
+    /// Esc while editing.
+    CancelRename,
 }
 
 /// How a card's player looks this frame.
@@ -85,7 +95,10 @@ impl ClipsPage {
         self.refresh(ui.ctx(), &snap.cfg.out_dir);
         self.update_playing(ui.ctx());
 
-        let visible: Vec<ClipFile> = self.clips.iter().filter(|c| !self.deleted.contains(&c.path)).cloned().collect();
+        let all: Vec<ClipFile> = self.clips.iter().filter(|c| !self.deleted.contains(&c.path)).cloned().collect();
+        let today = today();
+        let query = self.search.trim().to_lowercase();
+        let visible: Vec<ClipFile> = all.iter().filter(|c| matches_search(c, &query, today)).cloned().collect();
 
         // Header
         let width = ui.available_width();
@@ -97,8 +110,8 @@ impl ClipsPage {
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
                 text(ui, "Clips", 20.0, Weight::Bold, HEADER_PRIMARY);
                 ui.add_space(4.0);
-                let total: u64 = visible.iter().map(|c| c.size).sum();
-                let summary = match visible.len() {
+                let total: u64 = all.iter().map(|c| c.size).sum();
+                let summary = match all.len() {
                     0 => format!("Saved in {}", snap.cfg.out_dir.display()),
                     1 => format!("1 clip · {} · {}", megabytes(total), snap.cfg.out_dir.display()),
                     n => format!("{n} clips · {} · {}", megabytes(total), snap.cfg.out_dir.display()),
@@ -106,12 +119,19 @@ impl ClipsPage {
                 text(ui, summary, 14.0, Weight::Regular, HEADER_SECONDARY);
             });
         });
-        ui.add_space(20.0);
+        ui.add_space(16.0);
 
-        if visible.is_empty() {
+        if !all.is_empty() {
+            search_box(ui, &mut self.search);
+            ui.add_space(16.0);
+        }
+
+        if all.is_empty() {
             empty_state(ui, snap);
+        } else if visible.is_empty() {
+            text(ui, format!("No clips match \"{}\".", self.search.trim()), 15.0, Weight::Regular, HEADER_SECONDARY);
         } else {
-            self.grid(ui, &visible);
+            self.grid(ui, &visible, today);
         }
 
         self.show_toast(ui);
@@ -152,12 +172,11 @@ impl ClipsPage {
         }
     }
 
-    fn grid(&mut self, ui: &mut Ui, clips: &[ClipFile]) {
+    fn grid(&mut self, ui: &mut Ui, clips: &[ClipFile], today: i32) {
         let width = ui.available_width();
         let cols = (((width + GAP) / (TILE_MIN_WIDTH + GAP)).floor() as usize).max(1);
         let tile_w = (width - GAP * (cols - 1) as f32) / cols as f32;
         let analyses = self.analyses.lock().unwrap().clone();
-        let today = today();
 
         for row in clips.chunks(cols) {
             let (row_rect, _) = ui.allocate_exact_size(vec2(width, TILE_HEIGHT), Sense::hover());
@@ -174,7 +193,8 @@ impl ClipsPage {
                     }
                     _ => PlayerView::default(),
                 };
-                if let Some(action) = tile(ui, rect, clip, analysis, view, today) {
+                let editing = self.renaming.as_mut().filter(|(p, _)| *p == clip.path).map(|(_, text)| text);
+                if let Some(action) = tile(ui, rect, clip, analysis, view, editing, today) {
                     self.act(action, clip);
                 }
             }
@@ -219,10 +239,54 @@ impl ClipsPage {
                 self.toast = Some(("Moved to the Recycle Bin.".into(), Instant::now()));
                 Ok(())
             }
+            Action::StartRename => {
+                self.renaming = Some((clip.path.clone(), clip.name.clone().unwrap_or_default()));
+                Ok(())
+            }
+            Action::CancelRename => {
+                self.renaming = None;
+                Ok(())
+            }
+            Action::FinishRename => {
+                if let Some((path, name)) = self.renaming.take() {
+                    self.rename(&path, &name, clip);
+                }
+                Ok(())
+            }
         };
         if let Err(e) = result {
             crate::log!("playback failed: {e:#}");
             self.toast = Some((format!("Couldn't play the clip: {e:#}"), Instant::now()));
+        }
+    }
+
+    /// Renames the file right away (not via the tray thread), so the card,
+    /// its waveform and a playing clip can follow it to its new name.
+    fn rename(&mut self, path: &Path, name: &str, clip: &ClipFile) {
+        if name.trim() == clip.name.as_deref().unwrap_or("") {
+            return; // unchanged
+        }
+        match library::rename(path, name) {
+            Ok(new) if new == path => {}
+            Ok(new) => {
+                crate::log!("renamed {} to {}", path.display(), new.display());
+                if let Some(p) = self.player.as_mut().filter(|p| p.path() == path) {
+                    p.set_path(new.clone());
+                }
+                // Keep the waveform instead of reading the file again.
+                let mut analyses = self.analyses.lock().unwrap();
+                if let Some(a) = analyses.remove(path) {
+                    analyses.insert(new.clone(), a);
+                }
+                if let Some(m) = self.queued.remove(path) {
+                    self.queued.insert(new, m);
+                }
+                self.last_scan = None; // rescan now
+            }
+            Err(e) => {
+                crate::log!("rename failed: {e:#}");
+                self.toast = Some((format!("Couldn't rename the clip: {e:#}"), Instant::now()));
+            }
         }
     }
 
@@ -303,6 +367,7 @@ fn tile(
     clip: &ClipFile,
     analysis: Option<&Result<Analysis, String>>,
     view: PlayerView,
+    editing: Option<&mut String>,
     today: i32,
 ) -> Option<Action> {
     let id = ui.make_persistent_id(("clip", &clip.path));
@@ -389,31 +454,56 @@ fn tile(
         }
     }
 
-    // Title and details.
-    let title = clip.saved.map(|s| when(s, today)).unwrap_or_else(|| {
-        clip.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
-    });
+    // Title: the clip's name, or when it was saved. Click it to rename.
+    let date = clip.saved.map(|s| when(s, today));
+    let title = clip.name.clone().or_else(|| date.clone()).unwrap_or_default();
     let title_y = panel.bottom() + 12.0;
     let title_rect = Rect::from_min_max(pos2(inner.left(), title_y), pos2(inner.right() - 96.0, title_y + 20.0));
-    // One line, ending in "…" when it doesn't fit (e.g. long custom names).
-    let mut job = egui::text::LayoutJob::simple_singleline(title, font(15.0, Weight::Semibold), HEADER_PRIMARY);
-    job.wrap = egui::text::TextWrapping {
-        max_width: title_rect.width(),
-        max_rows: 1,
-        break_anywhere: true,
-        overflow_character: Some('…'),
-    };
-    painter.galley(title_rect.left_top(), painter.layout_job(job), HEADER_PRIMARY);
+    match editing {
+        Some(text) => {
+            if let Some(a) = name_editor(ui, title_rect.expand2(vec2(4.0, 3.0)), text, id.with("rename")) {
+                action = Some(a);
+            }
+        }
+        None => {
+            let resp = ui
+                .interact(title_rect, id.with("title"), Sense::click())
+                .on_hover_cursor(CursorIcon::Text)
+                .on_hover_text("Click to rename");
+            if resp.clicked() {
+                action = Some(Action::StartRename);
+            }
+            // One line, ending in "…" when it doesn't fit (e.g. long names).
+            let mut job = egui::text::LayoutJob::simple_singleline(title, font(15.0, Weight::Semibold), HEADER_PRIMARY);
+            job.wrap = egui::text::TextWrapping {
+                max_width: title_rect.width() - 20.0,
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('…'),
+            };
+            let galley = ui.painter().layout_job(job);
+            let end = title_rect.left() + galley.size().x;
+            ui.painter().galley(title_rect.left_top(), galley, HEADER_PRIMARY);
+            if resp.hovered() {
+                pencil(ui.painter(), pos2(end + 11.0, title_rect.top() + 10.0), HEADER_SECONDARY);
+            }
+        }
+    }
+    let painter = ui.painter();
     // "0:12 / 0:30" while this clip is in the player, else just the length.
     let length = match head.filter(|_| view.active || drag_at.is_some() || released_at.is_some()) {
         Some(f) => format!("{} / {}", clock(f * seconds), clock(seconds)),
         None => clock(seconds),
     };
     painter.text(pos2(inner.right(), title_y), Align2::RIGHT_TOP, length, font(14.0, Weight::Semibold), HEADER_SECONDARY);
-    let detail = match analysis {
-        Some(Err(_)) => format!("{} · can't read this file", megabytes(clip.size)),
+    // Named clips show their date here instead.
+    let mut detail = match (&clip.name, &date) {
+        (Some(_), Some(d)) => format!("{d} · {}", megabytes(clip.size)),
         _ => megabytes(clip.size),
     };
+    if let Some(Err(_)) = analysis {
+        detail.push_str(" · can't read this file");
+    }
     painter.text(pos2(inner.left(), title_y + 23.0), Align2::LEFT_TOP, detail, font(13.0, Weight::Regular), TEXT_MUTED);
 
     // Buttons.
@@ -432,6 +522,97 @@ fn tile(
         }
     });
     action
+}
+
+/// Inline name editor over a card's title. Enter or clicking away saves,
+/// Esc cancels.
+fn name_editor(ui: &mut Ui, rect: Rect, text: &mut String, id: egui::Id) -> Option<Action> {
+    ui.painter().rect_filled(rect, CornerRadius::same(4), BG_TERTIARY);
+    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, BLURPLE), egui::StrokeKind::Inside);
+    let edit = egui::TextEdit::singleline(text)
+        .id(id)
+        .frame(Frame::NONE)
+        .font(font(15.0, Weight::Semibold))
+        .text_color(HEADER_PRIMARY)
+        .hint_text(egui::RichText::new("Name this clip").color(TEXT_MUTED))
+        .desired_width(rect.width() - 12.0);
+    let resp = ui.put(rect.shrink2(vec2(6.0, 2.0)), edit);
+    if resp.lost_focus() {
+        return Some(if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            Action::CancelRename
+        } else {
+            Action::FinishRename
+        });
+    }
+    if !resp.has_focus() {
+        resp.request_focus(); // just opened
+    }
+    None
+}
+
+/// A small pencil, shown next to a title on hover (it can be renamed).
+fn pencil(painter: &Painter, c: egui::Pos2, color: Color32) {
+    let s = Stroke::new(1.6, color);
+    let (a, b) = (c + vec2(-4.0, 4.0), c + vec2(3.5, -3.5));
+    painter.line_segment([a, b], s);
+    painter.line_segment([b + vec2(-1.5, -1.5), b + vec2(1.5, 1.5)], s);
+    painter.line_segment([a, a + vec2(2.5, 0.0)], s);
+    painter.line_segment([a, a + vec2(0.0, -2.5)], s);
+}
+
+/// Discord-style search field with a magnifier and a clear button.
+fn search_box(ui: &mut Ui, query: &mut String) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width().min(360.0), 34.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(4), BG_TERTIARY);
+    // Magnifier.
+    let c = pos2(rect.right() - 18.0, rect.center().y);
+    if query.is_empty() {
+        ui.painter().circle_stroke(c + vec2(-1.5, -1.5), 5.0, Stroke::new(1.6, TEXT_MUTED));
+        ui.painter().line_segment([c + vec2(2.0, 2.0), c + vec2(6.0, 6.0)], Stroke::new(1.8, TEXT_MUTED));
+    } else {
+        // Clear (x).
+        let clear = ui.interact(Rect::from_center_size(c, vec2(22.0, 22.0)), ui.make_persistent_id("search-clear"), Sense::click());
+        let col = if clear.hovered() { HEADER_PRIMARY } else { TEXT_MUTED };
+        let s = Stroke::new(1.8, col);
+        ui.painter().line_segment([c + vec2(-4.5, -4.5), c + vec2(4.5, 4.5)], s);
+        ui.painter().line_segment([c + vec2(4.5, -4.5), c + vec2(-4.5, 4.5)], s);
+        if clear.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+            query.clear();
+        }
+    }
+    let edit = egui::TextEdit::singleline(query)
+        .id(ui.make_persistent_id("clip-search"))
+        .frame(Frame::NONE)
+        .font(font(15.0, Weight::Regular))
+        .text_color(TEXT_NORMAL)
+        .hint_text(egui::RichText::new("Search clips").color(TEXT_MUTED))
+        .desired_width(rect.width() - 44.0);
+    let resp = ui.put(Rect::from_min_max(rect.min + vec2(10.0, 7.0), rect.max - vec2(34.0, 7.0)), edit);
+    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        query.clear();
+    }
+}
+
+/// A clip matches when every word of the query appears in its name, its
+/// date as shown ("Today, 20:22", "Nov 9") or its file name.
+fn matches_search(clip: &ClipFile, query: &str, today: i32) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let mut haystack = String::new();
+    if let Some(n) = &clip.name {
+        haystack.push_str(n);
+        haystack.push(' ');
+    }
+    if let Some(s) = clip.saved {
+        haystack.push_str(&when(s, today));
+        haystack.push(' ');
+    }
+    if let Some(f) = clip.path.file_name() {
+        haystack.push_str(&f.to_string_lossy());
+    }
+    let haystack = haystack.to_lowercase();
+    query.split_whitespace().all(|word| haystack.contains(word))
 }
 
 /// The round blurple button: a triangle to play, two bars to pause.
@@ -539,5 +720,25 @@ mod tests {
         assert_eq!(when(at, day + 400), "Nov 9 2026, 21:31");
         assert_eq!(clock(29.6), "0:30");
         assert_eq!(clock(125.0), "2:05");
+    }
+
+    #[test]
+    fn searches_names_and_dates() {
+        let (saved, name) = crate::library::split_clip_name("discord_clip_20261109_213151 Bob laughs");
+        let clip = ClipFile {
+            path: PathBuf::from(r"C:\clips\discord_clip_20261109_213151 Bob laughs.wav"),
+            size: 1,
+            modified: SystemTime::UNIX_EPOCH,
+            saved,
+            name,
+        };
+        let today = days_from_civil(2026, 11, 9);
+        assert!(matches_search(&clip, "", today));
+        assert!(matches_search(&clip, "bob", today));
+        assert!(matches_search(&clip, "laughs bob", today)); // any word order
+        assert!(matches_search(&clip, "today", today)); // the date as shown
+        assert!(matches_search(&clip, "nov 9", today + 5));
+        assert!(matches_search(&clip, "20261109", today)); // file name
+        assert!(!matches_search(&clip, "alice", today));
     }
 }
