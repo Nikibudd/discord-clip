@@ -50,6 +50,12 @@ pub enum Command {
     OpenConfigFile,
     /// Restart the app (re-reads the config file) and reopen this window.
     Restart,
+    SetCheckUpdates(bool),
+    CheckUpdates,
+    /// Download and install the update found by the last check.
+    InstallUpdate,
+    /// Open an https link in the browser.
+    OpenUrl(String),
 }
 
 /// Everything the window shows, published by the tray thread.
@@ -65,6 +71,9 @@ pub struct Snapshot {
     pub hotkey_error: Option<String>,
     /// Clip length or microphone changed; they apply after a restart.
     pub restart_needed: bool,
+    pub update: crate::update::Status,
+    /// Installed copy (updates via installer) rather than a portable exe.
+    pub installed: bool,
 }
 
 struct Shared {
@@ -73,6 +82,8 @@ struct Shared {
     ctx: Mutex<Option<egui::Context>>,
     hwnd: AtomicIsize,
     started: AtomicBool,
+    /// Page to switch to the next time the window draws.
+    requested_page: Mutex<Option<Page>>,
 }
 
 fn shared() -> &'static Shared {
@@ -83,6 +94,7 @@ fn shared() -> &'static Shared {
         ctx: Mutex::new(None),
         hwnd: AtomicIsize::new(0),
         started: AtomicBool::new(false),
+        requested_page: Mutex::new(None),
     })
 }
 
@@ -110,6 +122,12 @@ pub fn window_hwnd() -> Option<HWND> {
 fn send(cmd: Command) {
     shared().commands.lock().unwrap().push(cmd);
     crate::tray::post_ui_command();
+}
+
+/// Tray thread: shows the window on a given page.
+pub fn open_page(snapshot: Snapshot, page: Page) {
+    *shared().requested_page.lock().unwrap() = Some(page);
+    open(snapshot);
 }
 
 /// Tray thread: shows the window, creating it the first time. Closing the
@@ -486,21 +504,55 @@ fn key_to_vk(key: Key) -> Option<u32> {
     })
 }
 
+/// A status message, optionally with a colored dot in front.
+fn status_line(ui: &mut Ui, dot: Option<Color32>, msg: &str, color: Color32) {
+    ui.horizontal(|ui| {
+        if let Some(c) = dot {
+            let (rect, _) = ui.allocate_exact_size(vec2(10.0, 20.0), Sense::hover());
+            ui.painter().circle_filled(rect.center(), 5.0, c);
+            ui.add_space(2.0);
+        }
+        text(ui, msg, 15.0, Weight::Semibold, color);
+    });
+}
+
+fn progress_bar(ui: &mut Ui, frac: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(4), BG_TERTIARY);
+    let fill = Rect::from_min_max(rect.min, pos2(rect.left() + rect.width() * frac.clamp(0.0, 1.0), rect.max.y));
+    painter.rect_filled(fill, CornerRadius::same(4), BLURPLE);
+}
+
+/// "just now", "5 minutes ago", "3 hours ago", "2 days ago".
+fn ago(t: std::time::SystemTime) -> String {
+    let secs = t.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+    let plural = |n: u64, unit: &str| format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" });
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3599 => plural(secs / 60, "minute"),
+        3600..=86399 => plural(secs / 3600, "hour"),
+        _ => plural(secs / 86400, "day"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The window
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Page {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Page {
     Settings,
+    Updates,
 }
 
 impl Page {
-    const ALL: [Page; 1] = [Page::Settings];
+    const ALL: [Page; 2] = [Page::Settings, Page::Updates];
 
     fn title(self) -> &'static str {
         match self {
             Page::Settings => "Settings",
+            Page::Updates => "Updates",
         }
     }
 }
@@ -634,7 +686,14 @@ impl ClipWindow {
             });
             ui.add_space(8.0);
             for page in Page::ALL {
-                if self.nav_item(ui, page.title(), self.page == page).clicked() {
+                let badge = page == Page::Updates
+                    && matches!(
+                        snap.update.state,
+                        crate::update::State::Available(_)
+                            | crate::update::State::Downloading { .. }
+                            | crate::update::State::Ready { .. }
+                    );
+                if self.nav_item(ui, page.title(), self.page == page, badge).clicked() {
                     self.page = page;
                 }
                 ui.add_space(2.0);
@@ -642,7 +701,8 @@ impl ClipWindow {
         });
     }
 
-    fn nav_item(&self, ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
+    /// `badge`: Discord's red notification pill on the right.
+    fn nav_item(&self, ui: &mut Ui, label: &str, selected: bool, badge: bool) -> egui::Response {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
         let (fill, color) = if selected {
             (BG_SELECTED, Color32::WHITE)
@@ -660,6 +720,11 @@ impl ClipWindow {
             font(16.0, Weight::Semibold),
             color,
         );
+        if badge {
+            let pill = Rect::from_center_size(pos2(rect.right() - 18.0, rect.center().y), vec2(16.0, 16.0));
+            painter.rect_filled(pill, CornerRadius::same(8), RED);
+            painter.text(pill.center(), Align2::CENTER_CENTER, "1", font(12.0, Weight::Bold), Color32::WHITE);
+        }
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
@@ -896,6 +961,144 @@ impl ClipWindow {
         });
     }
 
+    // --- updates page ----------------------------------------------------
+
+    fn updates_page(&mut self, ui: &mut Ui, snap: &Snapshot) {
+        use crate::update::{State, CURRENT};
+
+        text(ui, "Updates", 20.0, Weight::Bold, HEADER_PRIMARY);
+        ui.add_space(20.0);
+
+        // Card: app, version and what's going on.
+        Frame::new()
+            .fill(BG_SECONDARY)
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(Margin::same(16))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::hover());
+                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                    ui.painter().image(self.icon_active.id(), rect, uv, Color32::WHITE);
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        ui.add_space(4.0);
+                        text(ui, "Discord Clip", 16.0, Weight::Semibold, HEADER_PRIMARY);
+                        ui.add_space(2.0);
+                        let kind = if snap.installed { "installed" } else { "portable" };
+                        text(ui, format!("Version {CURRENT} · {kind}"), 14.0, Weight::Regular, HEADER_SECONDARY);
+                    });
+                });
+                ui.add_space(16.0);
+
+                let checked = snap
+                    .update
+                    .last_checked
+                    .map(|t| format!("Last checked {}.", ago(t)))
+                    .unwrap_or_default();
+                match &snap.update.state {
+                    State::Idle => {
+                        status_line(ui, None, "Not checked for updates yet.", TEXT_NORMAL);
+                        ui.add_space(12.0);
+                        if button(ui, "Check for updates", ButtonKind::Primary).clicked() {
+                            send(Command::CheckUpdates);
+                        }
+                    }
+                    State::Checking => {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(16.0).color(BLURPLE));
+                            ui.add_space(4.0);
+                            text(ui, "Checking for updates…", 15.0, Weight::Semibold, TEXT_NORMAL);
+                        });
+                    }
+                    State::UpToDate => {
+                        status_line(ui, Some(GREEN), "You're up to date.", TEXT_NORMAL);
+                        ui.add_space(4.0);
+                        text(ui, checked, 14.0, Weight::Regular, TEXT_MUTED);
+                        ui.add_space(12.0);
+                        if button(ui, "Check again", ButtonKind::Secondary).clicked() {
+                            send(Command::CheckUpdates);
+                        }
+                    }
+                    State::Available(m) => {
+                        status_line(ui, Some(BLURPLE), &format!("Version {} is available.", m.version), HEADER_PRIMARY);
+                        ui.add_space(4.0);
+                        let released = m.published.get(..10).map(|d| format!("Released {d}. ")).unwrap_or_default();
+                        let how = if snap.installed {
+                            "Discord Clip closes for a few seconds while it installs, then starts again."
+                        } else {
+                            "This exe is replaced with the new version and restarted."
+                        };
+                        text(ui, format!("{released}{how}"), 14.0, Weight::Regular, HEADER_SECONDARY);
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if button(ui, "Update now", ButtonKind::Success).clicked() {
+                                send(Command::InstallUpdate);
+                            }
+                            if !m.notes_url.is_empty() && button(ui, "Release notes", ButtonKind::Secondary).clicked() {
+                                send(Command::OpenUrl(m.notes_url.clone()));
+                            }
+                        });
+                    }
+                    State::Downloading { manifest, done, total } => {
+                        text(ui, format!("Downloading version {}…", manifest.version), 15.0, Weight::Semibold, TEXT_NORMAL);
+                        ui.add_space(10.0);
+                        let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
+                        progress_bar(ui, frac);
+                        ui.add_space(6.0);
+                        text(
+                            ui,
+                            format!("{:.1} of {:.1} MB", *done as f32 / 1e6, *total as f32 / 1e6),
+                            14.0,
+                            Weight::Regular,
+                            TEXT_MUTED,
+                        );
+                    }
+                    State::Ready { manifest, .. } => {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(16.0).color(GREEN));
+                            ui.add_space(4.0);
+                            text(ui, format!("Installing version {}…", manifest.version), 15.0, Weight::Semibold, TEXT_NORMAL);
+                        });
+                    }
+                    State::Failed { error, manifest } => {
+                        let what = if manifest.is_some() { "Couldn't install the update." } else { "Couldn't check for updates." };
+                        status_line(ui, Some(RED), what, HEADER_PRIMARY);
+                        ui.add_space(4.0);
+                        text(ui, error, 14.0, Weight::Regular, HEADER_SECONDARY);
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if manifest.is_some() {
+                                if button(ui, "Try again", ButtonKind::Success).clicked() {
+                                    send(Command::InstallUpdate);
+                                }
+                            } else if button(ui, "Try again", ButtonKind::Primary).clicked() {
+                                send(Command::CheckUpdates);
+                            }
+                            if button(ui, "Open downloads page", ButtonKind::Secondary).clicked() {
+                                send(Command::OpenUrl(crate::update::RELEASES_URL.to_string()));
+                            }
+                        });
+                    }
+                }
+            });
+
+        divider(ui);
+
+        section_label(ui, "Automatic updates");
+        if row(
+            ui,
+            "Check for updates automatically",
+            "Looks for a new version when Discord Clip starts and every few hours, and lets you know. \
+             Nothing is installed until you click Update now.",
+            |ui| toggle(ui, snap.cfg.check_updates),
+        )
+        .clicked()
+        {
+            set(Command::SetCheckUpdates(!snap.cfg.check_updates));
+        }
+    }
+
     /// Floating bar like Discord's "You have unsaved changes".
     fn restart_bar(&self, ui: &mut Ui) {
         egui::Panel::bottom("restart")
@@ -942,6 +1145,7 @@ fn set(cmd: Command) {
             Command::SetMicGain(g) => cfg.mic_gain = *g,
             Command::SetClipboard(c) => cfg.clipboard = *c,
             Command::SetNotifications(n) => cfg.notifications = *n,
+            Command::SetCheckUpdates(c) => cfg.check_updates = *c,
             _ => {}
         }
     }
@@ -961,6 +1165,9 @@ impl eframe::App for ClipWindow {
             return;
         }
         self.poll_recording(ui);
+        if let Some(page) = shared().requested_page.lock().unwrap().take() {
+            self.page = page;
+        }
         let snap = shared().snapshot.lock().unwrap().clone();
 
         egui::Panel::left("sidebar")
@@ -979,6 +1186,7 @@ impl eframe::App for ClipWindow {
                     ui.set_max_width(ui.available_width().min(700.0));
                     match self.page {
                         Page::Settings => self.settings_page(ui, &snap),
+                        Page::Updates => self.updates_page(ui, &snap),
                     }
                 });
             });
