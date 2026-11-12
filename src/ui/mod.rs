@@ -64,13 +64,15 @@ pub enum Command {
     /// Restart the app (re-reads the config file) and reopen this window.
     Restart,
     SetCheckUpdates(bool),
+    SetSeparateTracks(bool),
     CheckUpdates,
     /// Download and install the update found by the last check.
     InstallUpdate,
     /// Open an https link in the browser.
     OpenUrl(String),
-    /// Copy a clip to the clipboard (to paste into Discord).
-    CopyClip(PathBuf),
+    /// Copy a clip to the clipboard (to paste into Discord). Clips with
+    /// separate tracks are copied as a stereo mix, or just one track.
+    CopyClip(PathBuf, crate::library::Tracks),
     /// Show a clip in Explorer.
     ShowClip(PathBuf),
     /// Move a clip to the Recycle Bin.
@@ -294,6 +296,7 @@ fn set(cmd: Command) {
             Command::SetClipboard(c) => snap.cfg.clipboard = *c,
             Command::SetNotifications(n) => snap.cfg.notifications = *n,
             Command::SetCheckUpdates(c) => snap.cfg.check_updates = *c,
+            Command::SetSeparateTracks(s) => snap.cfg.separate_tracks = *s,
             Command::SetAutostart(on) => {
                 snap.autostart = if *on { crate::autostart::State::On } else { crate::autostart::State::Off }
             }

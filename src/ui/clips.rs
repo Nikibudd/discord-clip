@@ -63,7 +63,8 @@ enum Action {
     Toggle,
     /// Clicked / let go on the waveform at this point (0..=1).
     Seek(f32),
-    Copy,
+    /// Copy to the clipboard: mixed, or one track of a clip with separate tracks.
+    Copy(library::Tracks),
     Show,
     Delete,
     /// Clicked the title: start editing the name.
@@ -257,9 +258,14 @@ impl ClipsPage {
                 Some(p) if p.path() == clip.path => p.seek(at),
                 _ => self.load(clip, at),
             },
-            Action::Copy => {
-                send(Command::CopyClip(clip.path.clone()));
-                self.toast = Some(("Copied. Paste it into a Discord chat with Ctrl+V.".into(), Instant::now()));
+            Action::Copy(tracks) => {
+                send(Command::CopyClip(clip.path.clone(), tracks));
+                let what = match tracks {
+                    library::Tracks::Both => "Copied",
+                    library::Tracks::Discord => "Copied Discord audio only",
+                    library::Tracks::Mic => "Copied your mic only",
+                };
+                self.toast = Some((format!("{what}. Paste it into a Discord chat with Ctrl+V."), Instant::now()));
                 Ok(())
             }
             Action::Show => {
@@ -349,7 +355,7 @@ impl ClipsPage {
                     .map(|()| Some("Trimmed. The original is in the Recycle Bin.".to_string()))
             }
             Choice::Copy { start, end } => library::trimmed_temp_copy(&path, start, end).map(|tmp| {
-                send(Command::CopyClip(tmp));
+                send(Command::CopyClip(tmp, library::Tracks::Both));
                 Some("Trimmed copy copied. Paste it into a Discord chat with Ctrl+V.".to_string())
             }),
         };
@@ -584,8 +590,10 @@ fn tile(
         (Some(_), Some(d)) => format!("{d} · {}", megabytes(clip.size)),
         _ => megabytes(clip.size),
     };
-    if let Some(Err(_)) = analysis {
-        detail.push_str(" · can't read this file");
+    match analysis {
+        Some(Err(_)) => detail.push_str(" · can't read this file"),
+        Some(Ok(a)) if a.channels == crate::clip::TRACK_CHANNELS => detail.push_str(" · 2 tracks"),
+        _ => {}
     }
     painter.text(pos2(inner.left(), title_y + 23.0), Align2::LEFT_TOP, detail, font(13.0, Weight::Regular), TEXT_MUTED);
 
@@ -594,7 +602,7 @@ fn tile(
     let mut row = ui.new_child(egui::UiBuilder::new().max_rect(buttons).layout(Layout::left_to_right(Align::Center)));
     row.spacing_mut().item_spacing.x = 8.0;
     if button_sized(&mut row, "Copy", ButtonKind::Primary, 30.0).on_hover_text("Copy to paste into Discord").clicked() {
-        action = Some(Action::Copy);
+        action = Some(Action::Copy(library::Tracks::Both));
     }
     // Everything else is in the ⋯ menu, so the card never runs out of room.
     let more = row
@@ -604,7 +612,8 @@ fn tile(
         action = Some(Action::ToggleMenu);
     }
     if menu_open {
-        if let Some(a) = card_menu(ui, id, &more) {
+        let has_tracks = matches!(analysis, Some(Ok(a)) if a.channels == crate::clip::TRACK_CHANNELS);
+        if let Some(a) = card_menu(ui, id, &more, has_tracks) {
             action = Some(a);
         }
     }
@@ -631,14 +640,23 @@ fn more_button(ui: &mut Ui, open: bool) -> egui::Response {
 
 /// The ⋯ menu, opening below its button like Discord's context menus.
 /// Returns the picked item, or `CloseMenu` on a click outside it.
-fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response) -> Option<Action> {
+fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool) -> Option<Action> {
+    use library::Tracks;
     let mut picked = None;
-    let items: [(&str, Color32, fn() -> Action); 4] = [
-        ("Trim…", TEXT_NORMAL, || Action::Trim),
-        ("Rename", TEXT_NORMAL, || Action::StartRename),
-        ("Show in Explorer", TEXT_NORMAL, || Action::Show),
-        ("Delete", RED, || Action::Delete),
-    ];
+    // Groups, separated by a line. Clips with separate tracks can copy one.
+    let mut groups: Vec<Vec<(&str, fn() -> Action)>> = Vec::new();
+    if has_tracks {
+        groups.push(vec![
+            ("Copy Discord only", || Action::Copy(Tracks::Discord)),
+            ("Copy mic only", || Action::Copy(Tracks::Mic)),
+        ]);
+    }
+    groups.push(vec![
+        ("Trim…", || Action::Trim),
+        ("Rename", || Action::StartRename),
+        ("Show in Explorer", || Action::Show),
+    ]);
+    groups.push(vec![("Delete", || Action::Delete)]);
     let area = egui::Area::new(id.with("menu"))
         .order(egui::Order::Foreground)
         .pivot(Align2::RIGHT_TOP)
@@ -651,25 +669,30 @@ fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response) -> Option<Action> {
                 .show(ui, |ui| {
                     ui.set_width(180.0);
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    for (i, (label, color, make)) in items.iter().enumerate() {
-                        if i == 3 {
-                            // Separator before Delete.
+                    for (g, group) in groups.iter().enumerate() {
+                        if g > 0 {
                             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
                             ui.painter().line_segment(
                                 [pos2(r.left() + 4.0, r.center().y), pos2(r.right() - 4.0, r.center().y)],
                                 Stroke::new(1.0, DIVIDER),
                             );
                         }
-                        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
-                        // Hover like Discord: blurple, or red for Delete.
-                        let hover_fill = if i == 3 { RED_BTN } else { BLURPLE };
-                        if resp.hovered() {
-                            ui.painter().rect_filled(r, CornerRadius::same(3), hover_fill);
-                        }
-                        let text_color = if resp.hovered() { Color32::WHITE } else { *color };
-                        ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, *label, font(14.0, Weight::Semibold), text_color);
-                        if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
-                            picked = Some(make());
+                        for (label, make) in group {
+                            let danger = *label == "Delete";
+                            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
+                            // Hover like Discord: blurple, or red for Delete.
+                            if resp.hovered() {
+                                ui.painter().rect_filled(r, CornerRadius::same(3), if danger { RED_BTN } else { BLURPLE });
+                            }
+                            let color = match (resp.hovered(), danger) {
+                                (true, _) => Color32::WHITE,
+                                (false, true) => RED,
+                                (false, false) => TEXT_NORMAL,
+                            };
+                            ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, *label, font(14.0, Weight::Semibold), color);
+                            if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                picked = Some(make());
+                            }
                         }
                     }
                 });
