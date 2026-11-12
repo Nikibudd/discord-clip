@@ -25,7 +25,8 @@ use crate::library::{self, Analysis, ClipFile, SavedAt};
 use crate::player::Playback;
 
 const RESCAN_EVERY: Duration = Duration::from_secs(2);
-const TILE_MIN_WIDTH: f32 = 250.0;
+// Wide enough for Copy / Show / Trim / Delete in one row.
+const TILE_MIN_WIDTH: f32 = 290.0;
 const TILE_HEIGHT: f32 = 186.0;
 const GAP: f32 = 16.0;
 /// Bytes per second of our clips (48 kHz, stereo, 16-bit), to estimate
@@ -52,6 +53,8 @@ pub struct ClipsPage {
     search: String,
     /// The clip whose name is being edited, and the text so far.
     renaming: Option<(PathBuf, String)>,
+    /// The Trim dialog, while it's open.
+    trim: Option<super::trim::TrimDialog>,
 }
 
 enum Action {
@@ -68,6 +71,8 @@ enum Action {
     FinishRename,
     /// Esc while editing.
     CancelRename,
+    /// Open the Trim dialog.
+    Trim,
 }
 
 /// How a card's player looks this frame.
@@ -85,6 +90,13 @@ impl ClipsPage {
     pub fn stop(&mut self) {
         // Dropping the playback stops the device.
         self.player = None;
+    }
+
+    /// The window is being hidden: stop all playback and close the dialog.
+    pub fn on_hide(&mut self) {
+        self.stop();
+        self.trim = None;
+        self.renaming = None;
     }
 
     fn is_loaded(&self, clip: &ClipFile) -> bool {
@@ -134,6 +146,7 @@ impl ClipsPage {
             self.grid(ui, &visible, today);
         }
 
+        self.show_trim(ui.ctx());
         self.show_toast(ui);
     }
 
@@ -243,6 +256,10 @@ impl ClipsPage {
                 self.renaming = Some((clip.path.clone(), clip.name.clone().unwrap_or_default()));
                 Ok(())
             }
+            Action::Trim => {
+                self.stop(); // the dialog has its own playback
+                super::trim::TrimDialog::open(clip).map(|d| self.trim = Some(d))
+            }
             Action::CancelRename => {
                 self.renaming = None;
                 Ok(())
@@ -255,8 +272,8 @@ impl ClipsPage {
             }
         };
         if let Err(e) = result {
-            crate::log!("playback failed: {e:#}");
-            self.toast = Some((format!("Couldn't play the clip: {e:#}"), Instant::now()));
+            crate::log!("clip action failed: {e:#}");
+            self.toast = Some((format!("Couldn't open the clip: {e:#}"), Instant::now()));
         }
     }
 
@@ -286,6 +303,48 @@ impl ClipsPage {
             Err(e) => {
                 crate::log!("rename failed: {e:#}");
                 self.toast = Some((format!("Couldn't rename the clip: {e:#}"), Instant::now()));
+            }
+        }
+    }
+
+    /// Shows the Trim dialog if it's open, and carries out what was chosen.
+    fn show_trim(&mut self, ctx: &egui::Context) {
+        use super::trim::Choice;
+        let Some(dialog) = &mut self.trim else { return };
+        let Some(choice) = dialog.show(ctx) else { return };
+        let path = dialog.clip().path.clone();
+        let result = match choice {
+            Choice::Cancel => Ok(None),
+            Choice::SaveNew { start, end } => {
+                library::save_trimmed_copy(&path, start, end).map(|p| Some(format!("Saved as {}.", file_name(&p))))
+            }
+            Choice::Replace { start, end } => {
+                if self.player.as_ref().is_some_and(|p| p.path() == path) {
+                    self.stop();
+                }
+                library::replace_with_trimmed(&path, start, end)
+                    .map(|()| Some("Trimmed. The original is in the Recycle Bin.".to_string()))
+            }
+            Choice::Copy { start, end } => library::trimmed_temp_copy(&path, start, end).map(|tmp| {
+                send(Command::CopyClip(tmp));
+                Some("Trimmed copy copied. Paste it into a Discord chat with Ctrl+V.".to_string())
+            }),
+        };
+        match result {
+            Ok(msg) => {
+                self.trim = None;
+                if let Some(msg) = msg {
+                    crate::log!("trim of {}: {msg}", path.display());
+                    self.toast = Some((msg, Instant::now()));
+                    self.last_scan = None; // show the new / changed clip now
+                }
+            }
+            Err(e) => {
+                crate::log!("trim of {} failed: {e:#}", path.display());
+                // Keep the dialog open so the user can try again.
+                if let Some(d) = &mut self.trim {
+                    d.set_error(format!("{e:#}"));
+                }
             }
         }
     }
@@ -516,6 +575,9 @@ fn tile(
     if button_sized(&mut row, "Show", ButtonKind::Secondary, 30.0).on_hover_text("Show in Explorer").clicked() {
         action = Some(Action::Show);
     }
+    if button_sized(&mut row, "Trim", ButtonKind::Secondary, 30.0).on_hover_text("Cut out the part you want").clicked() {
+        action = Some(Action::Trim);
+    }
     row.with_layout(Layout::right_to_left(Align::Center), |row| {
         if button_sized(row, "Delete", ButtonKind::Secondary, 30.0).on_hover_text("Move to the Recycle Bin").clicked() {
             action = Some(Action::Delete);
@@ -616,7 +678,7 @@ fn matches_search(clip: &ClipFile, query: &str, today: i32) -> bool {
 }
 
 /// The round blurple button: a triangle to play, two bars to pause.
-fn play_button(ui: &Ui, center: egui::Pos2, playing: bool, hovered: bool) {
+pub(super) fn play_button(ui: &Ui, center: egui::Pos2, playing: bool, hovered: bool) {
     let painter = ui.painter();
     painter.circle_filled(center, 18.0, if hovered { BLURPLE_HOVER } else { BLURPLE });
     if playing {
@@ -652,23 +714,27 @@ fn time_bubble(ui: &Ui, x: f32, panel: Rect, label: &str) {
 // ---------------------------------------------------------------------------
 
 /// 0:12.4, for scrubbing.
-fn clock_precise(seconds: f32) -> String {
+pub(super) fn clock_precise(seconds: f32) -> String {
     let tenths = (seconds.max(0.0) * 10.0).round() as u32;
     format!("{}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
 }
 
-fn megabytes(bytes: u64) -> String {
+fn file_name(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+pub(super) fn megabytes(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
 /// 0:30, 2:05
-fn clock(seconds: f32) -> String {
+pub(super) fn clock(seconds: f32) -> String {
     let s = seconds.round().max(0.0) as u32;
     format!("{}:{:02}", s / 60, s % 60)
 }
 
 /// "Today, 19:31", "Yesterday, 08:02", "Nov 9, 21:31", "Nov 9 2025, 21:31".
-fn when(s: SavedAt, today: i32) -> String {
+pub(super) fn when(s: SavedAt, today: i32) -> String {
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let time = format!("{:02}:{:02}", s.hour, s.minute);
     let day = days_from_civil(s.year as i32, s.month as u32, s.day as u32);
@@ -682,7 +748,7 @@ fn when(s: SavedAt, today: i32) -> String {
 }
 
 /// Today's local date as a day number (see `days_from_civil`).
-fn today() -> i32 {
+pub(super) fn today() -> i32 {
     let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
     days_from_civil(t.wYear as i32, t.wMonth as u32, t.wDay as u32)
 }

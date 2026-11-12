@@ -49,6 +49,8 @@ pub fn scan(dir: &Path) -> Vec<ClipFile> {
     let mut clips: Vec<ClipFile> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("wav")))
+        // Skip our own temporary files (e.g. while replacing a clip with a trim).
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
         .filter_map(|e| {
             let meta = e.metadata().ok()?;
             if !meta.is_file() {
@@ -138,22 +140,28 @@ pub fn rename(path: &Path, name: &str) -> Result<PathBuf> {
     Ok(target)
 }
 
-/// Reads a clip's length and waveform. Takes ~10 ms for a 30 s clip.
+/// Reads a clip's length and its waveform for a card. Takes ~10 ms for a 30 s clip.
 pub fn analyze(path: &Path) -> Result<Analysis> {
+    analyze_bars(path, WAVEFORM_BARS)
+}
+
+/// Like `analyze`, with `bars` waveform bars (e.g. more for the trim view).
+pub fn analyze_bars(path: &Path, bars: usize) -> Result<Analysis> {
+    let bars = bars.max(1);
     let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
     let spec = reader.spec();
     let frames = reader.duration() as usize;
     let seconds = frames as f32 / spec.sample_rate.max(1) as f32;
     let channels = spec.channels.max(1) as usize;
-    let mut peaks = vec![0f32; WAVEFORM_BARS];
+    let mut peaks = vec![0f32; bars];
     if frames > 0 {
         let scale = match spec.sample_format {
             hound::SampleFormat::Float => 1.0,
             hound::SampleFormat::Int => 1.0 / (1u64 << (spec.bits_per_sample.clamp(1, 32) - 1)) as f32,
         };
         let mut push = |i: usize, v: f32| {
-            let bar = (i / channels) * WAVEFORM_BARS / frames;
-            let p = &mut peaks[bar.min(WAVEFORM_BARS - 1)];
+            let bar = (i / channels) * bars / frames;
+            let p = &mut peaks[bar.min(bars - 1)];
             *p = p.max(v.abs());
         };
         match spec.sample_format {
@@ -181,6 +189,88 @@ fn normalize(mut peaks: Vec<f32>) -> Vec<f32> {
         *p = p.max(0.06);
     }
     peaks
+}
+
+/// Fade at each cut of a trimmed clip, so it doesn't start or end with a click.
+const TRIM_FADE_SECS: f32 = 0.01;
+
+/// Writes the part of `src` between `start` and `end` (0..=1 of its length)
+/// to `dest`, in the same WAV format (sample rate, channels, bit depth), with
+/// a short fade at both cuts.
+pub fn write_trimmed(src: &Path, start: f32, end: f32, dest: &Path) -> Result<()> {
+    let mut reader = hound::WavReader::open(src).with_context(|| format!("opening {}", src.display()))?;
+    let spec = reader.spec();
+    let channels = spec.channels.max(1) as usize;
+    let frames = reader.duration() as usize;
+    let (start, end) = (start.clamp(0.0, 1.0), end.clamp(0.0, 1.0));
+    let first = (start * frames as f32) as usize;
+    let last = ((end * frames as f32) as usize).min(frames);
+    if last <= first {
+        bail!("nothing selected");
+    }
+    let fade = ((TRIM_FADE_SECS * spec.sample_rate as f32) as usize).min((last - first) / 2).max(1);
+    let gain = |frame: usize| -> f32 {
+        let from_start = frame - first;
+        let to_end = last - 1 - frame;
+        (from_start.min(to_end) as f32 / fade as f32).min(1.0)
+    };
+    let mut writer = hound::WavWriter::create(dest, spec).with_context(|| format!("writing {}", dest.display()))?;
+    // Seek to the first frame instead of reading everything before it.
+    reader.seek(first as u32)?;
+    let count = (last - first) * channels;
+    match spec.sample_format {
+        hound::SampleFormat::Float => {
+            for (i, s) in reader.samples::<f32>().take(count).enumerate() {
+                writer.write_sample(s? * gain(first + i / channels))?;
+            }
+        }
+        hound::SampleFormat::Int => {
+            for (i, s) in reader.samples::<i32>().take(count).enumerate() {
+                writer.write_sample((s? as f32 * gain(first + i / channels)).round() as i32)?;
+            }
+        }
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
+/// Saves the trimmed part as a new clip next to the original, keeping its
+/// timestamp so it sorts next to it: `discord_clip_<stamp> Bob (trimmed).wav`.
+pub fn save_trimmed_copy(src: &Path, start: f32, end: f32) -> Result<PathBuf> {
+    let dir = src.parent().context("clip has no folder")?;
+    let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = src.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "wav".into());
+    let mut dest = dir.join(format!("{stem} (trimmed).{ext}"));
+    let mut n = 2;
+    while dest.exists() {
+        dest = dir.join(format!("{stem} (trimmed {n}).{ext}"));
+        n += 1;
+    }
+    write_trimmed(src, start, end, &dest)?;
+    Ok(dest)
+}
+
+/// Replaces the clip with its trimmed part. The original goes to the
+/// Recycle Bin, so this can be undone.
+pub fn replace_with_trimmed(src: &Path, start: f32, end: f32) -> Result<()> {
+    let dir = src.parent().context("clip has no folder")?;
+    let tmp = dir.join(format!(".trimming-{}.wav", std::process::id()));
+    write_trimmed(src, start, end, &tmp)?;
+    if let Err(e) = recycle(src) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, src).with_context(|| format!("saving {}", src.display()))
+}
+
+/// Writes the trimmed part to a temporary file with the clip's file name (so
+/// that's the name Discord shows), for copying to the clipboard.
+pub fn trimmed_temp_copy(src: &Path, start: f32, end: f32) -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join("discord-clip-trimmed");
+    std::fs::create_dir_all(&dir)?;
+    let dest = dir.join(src.file_name().context("clip has no file name")?);
+    write_trimmed(src, start, end, &dest)?;
+    Ok(dest)
 }
 
 /// Moves a file to the Recycle Bin, so deleting a clip can be undone.
@@ -279,6 +369,38 @@ mod tests {
         let listed = scan(&dir);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].saved.unwrap().hour, 12);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trims_clips() {
+        let dir = std::env::temp_dir().join(format!("discord-clip-trim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("discord_clip_20261109_213151 Bob.wav");
+        // 2 s of a constant level, stereo.
+        crate::clip::write_wav(&src, &vec![0.5f32; 48_000 * 2 * 2]).unwrap();
+
+        let copy = save_trimmed_copy(&src, 0.25, 0.75).unwrap();
+        assert_eq!(copy.file_name().unwrap(), "discord_clip_20261109_213151 Bob (trimmed).wav");
+        let r = hound::WavReader::open(&copy).unwrap();
+        assert_eq!(r.spec(), hound::WavReader::open(&src).unwrap().spec());
+        assert_eq!(r.duration(), 48_000); // 1 s
+        let samples: Vec<i16> = hound::WavReader::open(&copy).unwrap().samples::<i16>().map(|s| s.unwrap()).collect();
+        assert_eq!(samples[0], 0, "fades in from silence");
+        assert!(samples[samples.len() / 2] > 16_000, "full level in the middle");
+        assert!(samples[samples.len() - 1].abs() < 100, "fades out");
+        // The trimmed copy still has the date and a name.
+        let (saved, name) = split_clip_name(&copy.file_stem().unwrap().to_string_lossy());
+        assert!(saved.is_some());
+        assert_eq!(name.as_deref(), Some("Bob (trimmed)"));
+        // Saving again doesn't overwrite.
+        let second = save_trimmed_copy(&src, 0.0, 0.5).unwrap();
+        assert_eq!(second.file_name().unwrap(), "discord_clip_20261109_213151 Bob (trimmed 2).wav");
+
+        let tmp = trimmed_temp_copy(&src, 0.0, 0.1).unwrap();
+        assert_eq!(tmp.file_name(), src.file_name());
+        assert_eq!(hound::WavReader::open(&tmp).unwrap().duration(), 9_600);
+        assert!(write_trimmed(&src, 0.6, 0.6, &dir.join("empty.wav")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
