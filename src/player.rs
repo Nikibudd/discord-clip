@@ -223,6 +223,13 @@ mod tests {
         let moved = p.position();
         assert!(moved > 0.55 && moved < 0.75, "after 300 ms {moved}");
 
+        // Seeking while playing reports the new position straight away (no
+        // stale value from before the seek, see #12).
+        p.seek(0.25).unwrap();
+        assert!((p.position() - 0.25).abs() < 0.02, "seek while playing {}", p.position());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(p.position() > 0.25 && p.position() < 0.4, "after seek {}", p.position());
+
         p.pause();
         let paused_at = p.position();
         std::thread::sleep(Duration::from_millis(200));

@@ -338,13 +338,18 @@ fn tile(
     // While dragging, the playhead follows the mouse; playback jumps there on release.
     let dragging = scrub.dragged() || scrub.is_pointer_button_down_on();
     let drag_at = scrub.interact_pointer_pos().map(|p| frac_at(p.x)).filter(|_| dragging);
-    if scrub.drag_stopped() || scrub.clicked() {
-        if let Some(p) = scrub.interact_pointer_pos() {
-            action = Some(Action::Seek(frac_at(p.x)));
-        }
+    // The frame the mouse is let go: the seek only happens after this card is
+    // drawn, so `view.position` is still the old spot. Draw the playhead where
+    // it was dropped, or it flashes back for a frame (#12).
+    let released_at = scrub
+        .interact_pointer_pos()
+        .map(|p| frac_at(p.x))
+        .filter(|_| scrub.drag_stopped() || scrub.clicked());
+    if let Some(at) = released_at {
+        action = Some(Action::Seek(at));
     }
-    let hover_at = scrub.hover_pos().map(|p| frac_at(p.x)).filter(|_| drag_at.is_none());
-    let head = drag_at.or(view.active.then_some(view.position));
+    let hover_at = scrub.hover_pos().map(|p| frac_at(p.x)).filter(|_| drag_at.is_none() && released_at.is_none());
+    let head = drag_at.or(released_at).or(view.active.then_some(view.position));
 
     let painter = ui.painter();
     let peaks: Vec<f32> = match analysis {
@@ -400,7 +405,7 @@ fn tile(
     };
     painter.galley(title_rect.left_top(), painter.layout_job(job), HEADER_PRIMARY);
     // "0:12 / 0:30" while this clip is in the player, else just the length.
-    let length = match head.filter(|_| view.active || drag_at.is_some()) {
+    let length = match head.filter(|_| view.active || drag_at.is_some() || released_at.is_some()) {
         Some(f) => format!("{} / {}", clock(f * seconds), clock(seconds)),
         None => clock(seconds),
     };
