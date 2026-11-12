@@ -1,0 +1,318 @@
+//! The Discord Clip window: a sidebar of pages styled after Discord's dark
+//! theme.
+//!
+//! The window runs on its own thread because winit needs to own a message
+//! loop. It never touches the running app directly: anything that changes
+//! state (hotkey registration, the config file, the folder picker, updates)
+//! is sent to the tray thread as a [`Command`], and the tray thread publishes
+//! a fresh [`Snapshot`] back for the window to draw.
+//!
+//! * `theme` / `widgets`: Discord's look and the controls built on it
+//! * `sidebar`: page list and status panel
+//! * `settings` (+ `keybind`), `updates`: the pages
+
+mod keybind;
+mod settings;
+mod sidebar;
+mod theme;
+mod updates;
+mod widgets;
+
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use eframe::egui::{self, Frame, Margin, TextureHandle, Ui, ViewportCommand};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::{
+    AllowSetForegroundWindow, IsIconic, SetForegroundWindow, ShowWindow, ASFW_ANY, SW_HIDE,
+    SW_RESTORE, SW_SHOW,
+};
+
+use crate::config::Config;
+use crate::hotkey::Hotkey;
+use crate::log;
+use theme::*;
+
+// ---------------------------------------------------------------------------
+// Window <-> tray thread
+// ---------------------------------------------------------------------------
+
+/// Requests from the window, handled on the tray thread.
+#[derive(Debug)]
+pub enum Command {
+    /// The user started recording a new hotkey: stop the current one firing.
+    BeginHotkeyCapture,
+    /// Recording finished; `None` means cancelled.
+    EndHotkeyCapture(Option<Hotkey>),
+    SetSeconds(u32),
+    SetMic(bool),
+    SetMicGain(f32),
+    SetClipboard(bool),
+    SetNotifications(bool),
+    PickFolder,
+    OpenFolder,
+    OpenLog,
+    OpenConfigFile,
+    /// Restart the app (re-reads the config file) and reopen this window.
+    Restart,
+    SetCheckUpdates(bool),
+    CheckUpdates,
+    /// Download and install the update found by the last check.
+    InstallUpdate,
+    /// Open an https link in the browser.
+    OpenUrl(String),
+}
+
+/// Everything the window shows, published by the tray thread.
+#[derive(Clone, Default)]
+pub struct Snapshot {
+    pub cfg: Config,
+    /// e.g. "Capturing Discord.exe (pid 1234)".
+    pub discord: String,
+    pub discord_active: bool,
+    /// "on", "off" or "unavailable".
+    pub mic: String,
+    pub hotkey_registered: bool,
+    pub hotkey_error: Option<String>,
+    /// Clip length or microphone changed; they apply after a restart.
+    pub restart_needed: bool,
+    pub update: crate::update::Status,
+    /// Installed copy (updates via installer) rather than a portable exe.
+    pub installed: bool,
+}
+
+struct Shared {
+    snapshot: Mutex<Snapshot>,
+    commands: Mutex<Vec<Command>>,
+    ctx: Mutex<Option<egui::Context>>,
+    hwnd: AtomicIsize,
+    started: AtomicBool,
+    /// Page to switch to the next time the window draws.
+    requested_page: Mutex<Option<Page>>,
+}
+
+fn shared() -> &'static Shared {
+    static SHARED: OnceLock<Shared> = OnceLock::new();
+    SHARED.get_or_init(|| Shared {
+        snapshot: Mutex::new(Snapshot::default()),
+        commands: Mutex::new(Vec::new()),
+        ctx: Mutex::new(None),
+        hwnd: AtomicIsize::new(0),
+        started: AtomicBool::new(false),
+        requested_page: Mutex::new(None),
+    })
+}
+
+/// Tray thread: updates what the window shows.
+pub fn publish(snapshot: Snapshot) {
+    *shared().snapshot.lock().unwrap() = snapshot;
+    if let Some(ctx) = shared().ctx.lock().unwrap().as_ref() {
+        ctx.request_repaint();
+    }
+}
+
+/// Tray thread: takes the window's pending requests.
+pub fn take_commands() -> Vec<Command> {
+    std::mem::take(&mut *shared().commands.lock().unwrap())
+}
+
+/// The window's handle once it exists, e.g. to own the folder picker.
+pub fn window_hwnd() -> Option<HWND> {
+    match shared().hwnd.load(Ordering::SeqCst) {
+        0 => None,
+        h => Some(HWND(h as *mut c_void)),
+    }
+}
+
+fn send(cmd: Command) {
+    shared().commands.lock().unwrap().push(cmd);
+    crate::tray::post_ui_command();
+}
+
+/// Tray thread: shows the window on a given page.
+pub fn open_page(snapshot: Snapshot, page: Page) {
+    *shared().requested_page.lock().unwrap() = Some(page);
+    open(snapshot);
+}
+
+/// Tray thread: shows the window, creating it the first time. Closing the
+/// window only hides it (winit can't create a second event loop).
+pub fn open(snapshot: Snapshot) {
+    publish(snapshot);
+    unsafe {
+        // We were just clicked in the tray, so we may hand focus to the
+        // window thread.
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+    if let Some(hwnd) = window_hwnd() {
+        unsafe {
+            let _ = ShowWindow(hwnd, if IsIconic(hwnd).as_bool() { SW_RESTORE } else { SW_SHOW });
+            let _ = SetForegroundWindow(hwnd);
+        }
+        return;
+    }
+    if shared().started.swap(true, Ordering::SeqCst) {
+        return; // still starting up
+    }
+    let spawned = std::thread::Builder::new().name("window".into()).spawn(|| {
+        if let Err(e) = run_window() {
+            log!("window failed: {e}");
+        }
+        shared().hwnd.store(0, Ordering::SeqCst);
+        *shared().ctx.lock().unwrap() = None;
+        shared().started.store(false, Ordering::SeqCst);
+    });
+    if let Err(e) = spawned {
+        log!("couldn't start window thread: {e}");
+        shared().started.store(false, Ordering::SeqCst);
+    }
+}
+
+fn run_window() -> eframe::Result {
+    let icon = egui::IconData { rgba: crate::icon::rgba(64, BLURPLE_RGB), width: 64, height: 64 };
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Discord Clip")
+            .with_inner_size([920.0, 640.0])
+            .with_min_inner_size([720.0, 480.0])
+            .with_icon(icon),
+        centered: true,
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            builder.with_any_thread(true);
+        })),
+        ..Default::default()
+    };
+    eframe::run_native("Discord Clip", options, Box::new(|cc| Ok(Box::new(ClipWindow::new(cc)))))
+}
+
+// ---------------------------------------------------------------------------
+// The window
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Page {
+    Settings,
+    Updates,
+}
+
+impl Page {
+    const ALL: [Page; 2] = [Page::Settings, Page::Updates];
+
+    fn title(self) -> &'static str {
+        match self {
+            Page::Settings => "Settings",
+            Page::Updates => "Updates",
+        }
+    }
+}
+
+/// The app icon as textures, active (blurple) and idle (gray).
+struct Icons {
+    active: TextureHandle,
+    idle: TextureHandle,
+}
+
+struct ClipWindow {
+    page: Page,
+    settings: settings::SettingsPage,
+    icons: Icons,
+}
+
+impl ClipWindow {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(handle) = cc.window_handle() {
+            if let RawWindowHandle::Win32(h) = handle.as_raw() {
+                let hwnd = h.hwnd.get();
+                shared().hwnd.store(hwnd, Ordering::SeqCst);
+                style_title_bar(HWND(hwnd as *mut c_void));
+            }
+        }
+        *shared().ctx.lock().unwrap() = Some(cc.egui_ctx.clone());
+        setup_fonts(&cc.egui_ctx);
+        setup_style(&cc.egui_ctx);
+
+        let texture = |name: &str, rgb| {
+            let img = egui::ColorImage::from_rgba_unmultiplied([64, 64], &crate::icon::rgba(64, rgb));
+            cc.egui_ctx.load_texture(name, img, egui::TextureOptions::LINEAR)
+        };
+        ClipWindow {
+            page: Page::Settings,
+            settings: settings::SettingsPage::default(),
+            icons: Icons { active: texture("icon-active", BLURPLE_RGB), idle: texture("icon-idle", IDLE_RGB) },
+        }
+    }
+
+    /// Closing only hides the window (winit can't create a second event loop).
+    fn hide(&mut self) {
+        self.settings.keybind.stop(None);
+        if let Some(hwnd) = window_hwnd() {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+}
+
+/// Sends a setting change, and shows it straight away instead of waiting
+/// for the tray thread to publish it back.
+fn set(cmd: Command) {
+    {
+        let mut snap = shared().snapshot.lock().unwrap();
+        let cfg = &mut snap.cfg;
+        match &cmd {
+            Command::SetSeconds(s) => cfg.seconds = *s,
+            Command::SetMic(m) => cfg.mic = *m,
+            Command::SetMicGain(g) => cfg.mic_gain = *g,
+            Command::SetClipboard(c) => cfg.clipboard = *c,
+            Command::SetNotifications(n) => cfg.notifications = *n,
+            Command::SetCheckUpdates(c) => cfg.check_updates = *c,
+            _ => {}
+        }
+    }
+    send(cmd);
+}
+
+impl eframe::App for ClipWindow {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        BG_PRIMARY.to_normalized_gamma_f32()
+    }
+
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.hide();
+            return;
+        }
+        self.settings.keybind.poll(ui);
+        if let Some(page) = shared().requested_page.lock().unwrap().take() {
+            self.page = page;
+        }
+        let snap = shared().snapshot.lock().unwrap().clone();
+
+        egui::Panel::left("sidebar")
+            .exact_size(220.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(Frame::new().fill(BG_SECONDARY))
+            .show(ui, |ui| sidebar::show(ui, &mut self.page, &snap, &self.icons));
+
+        egui::CentralPanel::default().frame(Frame::new().fill(BG_PRIMARY)).show(ui, |ui| {
+            if snap.restart_needed {
+                settings::restart_bar(ui);
+            }
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                Frame::new().inner_margin(Margin { left: 40, right: 40, top: 40, bottom: 40 }).show(ui, |ui| {
+                    ui.set_max_width(ui.available_width().min(700.0));
+                    match self.page {
+                        Page::Settings => self.settings.show(ui, &snap),
+                        Page::Updates => updates::show(ui, &snap, &self.icons.active),
+                    }
+                });
+            });
+        });
+    }
+}
