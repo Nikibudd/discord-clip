@@ -52,6 +52,10 @@ pub struct ClipsPage {
     search: String,
     /// The clip whose name is being edited, and the text so far.
     renaming: Option<(PathBuf, String)>,
+    /// The Trim dialog, while it's open.
+    trim: Option<super::trim::TrimDialog>,
+    /// The clip whose ⋯ menu is open.
+    menu: Option<PathBuf>,
 }
 
 enum Action {
@@ -68,6 +72,12 @@ enum Action {
     FinishRename,
     /// Esc while editing.
     CancelRename,
+    /// Open or close the card's ⋯ menu.
+    ToggleMenu,
+    /// Clicked outside the open menu.
+    CloseMenu,
+    /// Open the Trim dialog.
+    Trim,
 }
 
 /// How a card's player looks this frame.
@@ -85,6 +95,14 @@ impl ClipsPage {
     pub fn stop(&mut self) {
         // Dropping the playback stops the device.
         self.player = None;
+    }
+
+    /// The window is being hidden: stop all playback and close the dialog.
+    pub fn on_hide(&mut self) {
+        self.stop();
+        self.trim = None;
+        self.renaming = None;
+        self.menu = None;
     }
 
     fn is_loaded(&self, clip: &ClipFile) -> bool {
@@ -134,6 +152,7 @@ impl ClipsPage {
             self.grid(ui, &visible, today);
         }
 
+        self.show_trim(ui.ctx());
         self.show_toast(ui);
     }
 
@@ -194,7 +213,8 @@ impl ClipsPage {
                     _ => PlayerView::default(),
                 };
                 let editing = self.renaming.as_mut().filter(|(p, _)| *p == clip.path).map(|(_, text)| text);
-                if let Some(action) = tile(ui, rect, clip, analysis, view, editing, today) {
+                let menu_open = self.menu.as_deref() == Some(clip.path.as_path());
+                if let Some(action) = tile(ui, rect, clip, analysis, view, editing, menu_open, today) {
                     self.act(action, clip);
                 }
             }
@@ -203,7 +223,23 @@ impl ClipsPage {
     }
 
     fn act(&mut self, action: Action, clip: &ClipFile) {
+        let this_menu_open = self.menu.as_deref() == Some(clip.path.as_path());
+        match action {
+            Action::ToggleMenu => {
+                self.menu = if this_menu_open { None } else { Some(clip.path.clone()) };
+                return;
+            }
+            Action::CloseMenu => {
+                if this_menu_open {
+                    self.menu = None;
+                }
+                return;
+            }
+            // Anything else (including a menu item) closes the menu.
+            _ => self.menu = None,
+        }
         let result = match action {
+            Action::ToggleMenu | Action::CloseMenu => Ok(()),
             Action::Toggle => match &mut self.player {
                 Some(p) if p.path() == clip.path => {
                     if p.is_paused() {
@@ -243,6 +279,10 @@ impl ClipsPage {
                 self.renaming = Some((clip.path.clone(), clip.name.clone().unwrap_or_default()));
                 Ok(())
             }
+            Action::Trim => {
+                self.stop(); // the dialog has its own playback
+                super::trim::TrimDialog::open(clip).map(|d| self.trim = Some(d))
+            }
             Action::CancelRename => {
                 self.renaming = None;
                 Ok(())
@@ -255,8 +295,8 @@ impl ClipsPage {
             }
         };
         if let Err(e) = result {
-            crate::log!("playback failed: {e:#}");
-            self.toast = Some((format!("Couldn't play the clip: {e:#}"), Instant::now()));
+            crate::log!("clip action failed: {e:#}");
+            self.toast = Some((format!("Couldn't open the clip: {e:#}"), Instant::now()));
         }
     }
 
@@ -286,6 +326,48 @@ impl ClipsPage {
             Err(e) => {
                 crate::log!("rename failed: {e:#}");
                 self.toast = Some((format!("Couldn't rename the clip: {e:#}"), Instant::now()));
+            }
+        }
+    }
+
+    /// Shows the Trim dialog if it's open, and carries out what was chosen.
+    fn show_trim(&mut self, ctx: &egui::Context) {
+        use super::trim::Choice;
+        let Some(dialog) = &mut self.trim else { return };
+        let Some(choice) = dialog.show(ctx) else { return };
+        let path = dialog.clip().path.clone();
+        let result = match choice {
+            Choice::Cancel => Ok(None),
+            Choice::SaveNew { start, end } => {
+                library::save_trimmed_copy(&path, start, end).map(|p| Some(format!("Saved as {}.", file_name(&p))))
+            }
+            Choice::Replace { start, end } => {
+                if self.player.as_ref().is_some_and(|p| p.path() == path) {
+                    self.stop();
+                }
+                library::replace_with_trimmed(&path, start, end)
+                    .map(|()| Some("Trimmed. The original is in the Recycle Bin.".to_string()))
+            }
+            Choice::Copy { start, end } => library::trimmed_temp_copy(&path, start, end).map(|tmp| {
+                send(Command::CopyClip(tmp));
+                Some("Trimmed copy copied. Paste it into a Discord chat with Ctrl+V.".to_string())
+            }),
+        };
+        match result {
+            Ok(msg) => {
+                self.trim = None;
+                if let Some(msg) = msg {
+                    crate::log!("trim of {}: {msg}", path.display());
+                    self.toast = Some((msg, Instant::now()));
+                    self.last_scan = None; // show the new / changed clip now
+                }
+            }
+            Err(e) => {
+                crate::log!("trim of {} failed: {e:#}", path.display());
+                // Keep the dialog open so the user can try again.
+                if let Some(d) = &mut self.trim {
+                    d.set_error(format!("{e:#}"));
+                }
             }
         }
     }
@@ -368,6 +450,7 @@ fn tile(
     analysis: Option<&Result<Analysis, String>>,
     view: PlayerView,
     editing: Option<&mut String>,
+    menu_open: bool,
     today: i32,
 ) -> Option<Action> {
     let id = ui.make_persistent_id(("clip", &clip.path));
@@ -513,15 +596,88 @@ fn tile(
     if button_sized(&mut row, "Copy", ButtonKind::Primary, 30.0).on_hover_text("Copy to paste into Discord").clicked() {
         action = Some(Action::Copy);
     }
-    if button_sized(&mut row, "Show", ButtonKind::Secondary, 30.0).on_hover_text("Show in Explorer").clicked() {
-        action = Some(Action::Show);
+    // Everything else is in the ⋯ menu, so the card never runs out of room.
+    let more = row
+        .with_layout(Layout::right_to_left(Align::Center), |row| more_button(row, menu_open))
+        .inner;
+    if more.clicked() {
+        action = Some(Action::ToggleMenu);
     }
-    row.with_layout(Layout::right_to_left(Align::Center), |row| {
-        if button_sized(row, "Delete", ButtonKind::Secondary, 30.0).on_hover_text("Move to the Recycle Bin").clicked() {
-            action = Some(Action::Delete);
+    if menu_open {
+        if let Some(a) = card_menu(ui, id, &more) {
+            action = Some(a);
         }
-    });
+    }
     action
+}
+
+/// The square "⋯" button at the right of a card.
+fn more_button(ui: &mut Ui, open: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+    let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("More");
+    let fill = if open || resp.is_pointer_button_down_on() {
+        GRAY_BTN_ACTIVE
+    } else if resp.hovered() {
+        GRAY_BTN_HOVER
+    } else {
+        GRAY_BTN
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
+    for dx in [-6.0, 0.0, 6.0] {
+        ui.painter().circle_filled(rect.center() + vec2(dx, 0.0), 2.0, Color32::WHITE);
+    }
+    resp
+}
+
+/// The ⋯ menu, opening below its button like Discord's context menus.
+/// Returns the picked item, or `CloseMenu` on a click outside it.
+fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response) -> Option<Action> {
+    let mut picked = None;
+    let items: [(&str, Color32, fn() -> Action); 4] = [
+        ("Trim…", TEXT_NORMAL, || Action::Trim),
+        ("Rename", TEXT_NORMAL, || Action::StartRename),
+        ("Show in Explorer", TEXT_NORMAL, || Action::Show),
+        ("Delete", RED, || Action::Delete),
+    ];
+    let area = egui::Area::new(id.with("menu"))
+        .order(egui::Order::Foreground)
+        .pivot(Align2::RIGHT_TOP)
+        .fixed_pos(button.rect.right_bottom() + vec2(0.0, 4.0))
+        .show(ui.ctx(), |ui| {
+            Frame::new()
+                .fill(BG_FLOATING)
+                .corner_radius(CornerRadius::same(4))
+                .inner_margin(Margin::same(6))
+                .show(ui, |ui| {
+                    ui.set_width(180.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for (i, (label, color, make)) in items.iter().enumerate() {
+                        if i == 3 {
+                            // Separator before Delete.
+                            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
+                            ui.painter().line_segment(
+                                [pos2(r.left() + 4.0, r.center().y), pos2(r.right() - 4.0, r.center().y)],
+                                Stroke::new(1.0, DIVIDER),
+                            );
+                        }
+                        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
+                        // Hover like Discord: blurple, or red for Delete.
+                        let hover_fill = if i == 3 { RED_BTN } else { BLURPLE };
+                        if resp.hovered() {
+                            ui.painter().rect_filled(r, CornerRadius::same(3), hover_fill);
+                        }
+                        let text_color = if resp.hovered() { Color32::WHITE } else { *color };
+                        ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, *label, font(14.0, Weight::Semibold), text_color);
+                        if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                            picked = Some(make());
+                        }
+                    }
+                });
+        });
+    if picked.is_none() && area.response.clicked_elsewhere() && !button.clicked() && ui.input(|i| i.pointer.any_click()) {
+        picked = Some(Action::CloseMenu);
+    }
+    picked
 }
 
 /// Inline name editor over a card's title. Enter or clicking away saves,
@@ -616,7 +772,7 @@ fn matches_search(clip: &ClipFile, query: &str, today: i32) -> bool {
 }
 
 /// The round blurple button: a triangle to play, two bars to pause.
-fn play_button(ui: &Ui, center: egui::Pos2, playing: bool, hovered: bool) {
+pub(super) fn play_button(ui: &Ui, center: egui::Pos2, playing: bool, hovered: bool) {
     let painter = ui.painter();
     painter.circle_filled(center, 18.0, if hovered { BLURPLE_HOVER } else { BLURPLE });
     if playing {
@@ -652,23 +808,27 @@ fn time_bubble(ui: &Ui, x: f32, panel: Rect, label: &str) {
 // ---------------------------------------------------------------------------
 
 /// 0:12.4, for scrubbing.
-fn clock_precise(seconds: f32) -> String {
+pub(super) fn clock_precise(seconds: f32) -> String {
     let tenths = (seconds.max(0.0) * 10.0).round() as u32;
     format!("{}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
 }
 
-fn megabytes(bytes: u64) -> String {
+fn file_name(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+pub(super) fn megabytes(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
 /// 0:30, 2:05
-fn clock(seconds: f32) -> String {
+pub(super) fn clock(seconds: f32) -> String {
     let s = seconds.round().max(0.0) as u32;
     format!("{}:{:02}", s / 60, s % 60)
 }
 
 /// "Today, 19:31", "Yesterday, 08:02", "Nov 9, 21:31", "Nov 9 2025, 21:31".
-fn when(s: SavedAt, today: i32) -> String {
+pub(super) fn when(s: SavedAt, today: i32) -> String {
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let time = format!("{:02}:{:02}", s.hour, s.minute);
     let day = days_from_civil(s.year as i32, s.month as u32, s.day as u32);
@@ -682,7 +842,7 @@ fn when(s: SavedAt, today: i32) -> String {
 }
 
 /// Today's local date as a day number (see `days_from_civil`).
-fn today() -> i32 {
+pub(super) fn today() -> i32 {
     let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
     days_from_civil(t.wYear as i32, t.wMonth as u32, t.wDay as u32)
 }

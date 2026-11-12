@@ -26,11 +26,13 @@ window with a sidebar of pages. Closing it just hides it again.
 - **Clips** (the page it opens on): every clip in the clips folder as a card
   with its waveform, date, length and size, newest first. The play button
   plays/pauses; click or drag on the waveform to scrub (playhead, time under
-  the mouse). Click a title to **rename** the clip (the file keeps its
+  the mouse). Click a title (or **⋯ → Rename**) to **rename** the clip (the file keeps its
   timestamp: `discord_clip_20261109_213151 Bob laughs.wav`), and use the
-  **search** box to filter by name or date. **Copy** puts it on the clipboard for Ctrl+V in Discord,
-  **Show** opens it in Explorer, **Delete** moves it to the Recycle Bin. New
-  clips appear on their own.
+  **search** box to filter by name or date. **Copy** puts it on the clipboard
+  for Ctrl+V in Discord. The **⋯** menu has **Trim…** (a dialog to cut out the
+  part you want: save it as a new clip, replace the original, or copy just that
+  part for Discord), **Rename**, **Show in Explorer** and **Delete** (to the
+  Recycle Bin). New clips appear on their own.
 - **Settings**: hotkey recorder (combos already taken by another app are
   rejected), clip length, microphone on/off, which mic (falls back to the default if it's unplugged) and its volume, clips folder,
   clipboard and notification toggles, **Start with Windows**, and buttons to open/reload

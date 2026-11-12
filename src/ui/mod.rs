@@ -16,6 +16,7 @@ mod keybind;
 mod settings;
 mod sidebar;
 mod theme;
+mod trim;
 mod updates;
 mod widgets;
 
@@ -271,7 +272,7 @@ impl ClipWindow {
     /// Closing only hides the window (winit can't create a second event loop).
     fn hide(&mut self) {
         self.settings.keybind.stop(None);
-        self.clips.stop();
+        self.clips.on_hide();
         if let Some(hwnd) = window_hwnd() {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
