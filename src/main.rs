@@ -25,6 +25,7 @@ mod ringbuffer;
 mod tray;
 mod ui;
 mod update;
+mod volumes;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

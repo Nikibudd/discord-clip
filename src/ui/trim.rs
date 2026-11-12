@@ -12,6 +12,7 @@ use super::theme::*;
 use super::widgets::*;
 use crate::library::{self, ClipFile};
 use crate::player::Playback;
+use crate::volumes::Volumes;
 
 /// Bars in the dialog's waveform (cards use `library::WAVEFORM_BARS`).
 const BARS: usize = 160;
@@ -28,6 +29,8 @@ pub struct TrimDialog {
     start: f32,
     end: f32,
     player: Option<Playback>,
+    /// Volumes of the clip's tracks (#7), for playback.
+    volumes: Volumes,
     error: Option<String>,
 }
 
@@ -46,7 +49,7 @@ enum Handle {
 }
 
 impl TrimDialog {
-    pub fn open(clip: &ClipFile) -> anyhow::Result<TrimDialog> {
+    pub fn open(clip: &ClipFile, volumes: Volumes) -> anyhow::Result<TrimDialog> {
         let a = library::analyze_bars(&clip.path, BARS)?;
         Ok(TrimDialog {
             clip: clip.clone(),
@@ -55,6 +58,7 @@ impl TrimDialog {
             start: 0.0,
             end: 1.0,
             player: None,
+            volumes,
             error: None,
         })
     }
@@ -256,7 +260,7 @@ impl TrimDialog {
                 Ok(())
             }
             Some(p) => p.resume(),
-            None => match Playback::start(&self.clip.path, self.start) {
+            None => match Playback::start(&self.clip.path, self.start, self.volumes) {
                 Ok(p) => {
                     self.player = Some(p);
                     Ok(())
