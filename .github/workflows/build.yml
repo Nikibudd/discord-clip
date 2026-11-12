@@ -1,0 +1,151 @@
+# Builds, tests and packages Discord Clip on every push.
+#
+# Every run uploads the installer + portable exe as a workflow artifact.
+# Pushing a tag `vX.Y.Z` (matching the version in Cargo.toml) also publishes a
+# GitHub release with:
+#   discord-clip-X.Y.Z-setup.exe     installer (per-user, no admin)
+#   discord-clip-X.Y.Z-portable.exe  standalone exe
+#   latest.json                      update manifest the app can poll
+#   SHA256SUMS.txt
+#
+# The update manifest of the newest (non-pre)release is always at
+#   https://github.com/<owner>/<repo>/releases/latest/download/latest.json
+
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: write # creating releases
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Work out version
+        id: version
+        run: |
+          $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          $ref = '${{ github.ref }}'
+          if ($ref.StartsWith('refs/tags/')) {
+            $tag = $ref.Substring('refs/tags/'.Length)
+            if ($tag -ne "v$v") { throw "Tag $tag doesn't match the version in Cargo.toml ($v). Bump Cargo.toml first." }
+            $label = $v
+            $release = 'true'
+          } else {
+            $label = "$v-dev.$($env:GITHUB_SHA.Substring(0, 7))"
+            $release = 'false'
+          }
+          "version=$v"                         >> $env:GITHUB_OUTPUT
+          "numeric=$($v.Split('-')[0])"        >> $env:GITHUB_OUTPUT
+          "label=$label"                       >> $env:GITHUB_OUTPUT
+          "release=$release"                   >> $env:GITHUB_OUTPUT
+          "prerelease=$($v.Contains('-'))"     >> $env:GITHUB_OUTPUT
+          Write-Host "Version $v, building $label (release: $release)"
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Build installer
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Couldn't install Inno Setup" }
+          }
+          $label = '${{ steps.version.outputs.label }}'
+          & $iscc /Q `
+            "/DAppVersion=$label" `
+            "/DNumericVersion=${{ steps.version.outputs.numeric }}" `
+            "/DOutputName=discord-clip-$label-setup" `
+            "/DSourceExe=..\target\release\discord-clip.exe" `
+            installer\discord-clip.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: Package
+        run: |
+          $label = '${{ steps.version.outputs.label }}'
+          $v = '${{ steps.version.outputs.version }}'
+          $repo = '${{ github.repository }}'
+          $tag = "v$v"
+          $setup = "discord-clip-$label-setup.exe"
+          $portable = "discord-clip-$label-portable.exe"
+          Copy-Item target\release\discord-clip.exe "dist\$portable"
+
+          $base = "https://github.com/$repo/releases/download/$tag"
+          function Asset($name) {
+            $file = Get-Item "dist\$name"
+            [ordered]@{
+              name   = $name
+              url    = "$base/$name"
+              size   = $file.Length
+              sha256 = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            }
+          }
+          # Update manifest. Keep the shape stable (bump "schema" on breaking
+          # changes): released apps read it.
+          $manifest = [ordered]@{
+            schema      = 1
+            version     = $v
+            tag         = $tag
+            published   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            notes_url   = "https://github.com/$repo/releases/tag/$tag"
+            min_windows = '10.0.19041'
+            installer   = Asset $setup
+            portable    = Asset $portable
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content dist\latest.json -Encoding utf8NoBOM
+
+          Get-ChildItem dist\*.exe | ForEach-Object {
+            "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content dist\SHA256SUMS.txt -Encoding utf8NoBOM
+
+          Get-Content dist\latest.json
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: discord-clip-${{ steps.version.outputs.label }}
+          path: |
+            dist/*.exe
+            dist/latest.json
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish release
+        if: steps.version.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = '${{ steps.version.outputs.version }}'
+          $flags = @('--title', "Discord Clip $v", '--generate-notes', '--verify-tag')
+          if ('${{ steps.version.outputs.prerelease }}' -eq 'True') { $flags += '--prerelease' }
+          gh release create "v$v" @flags `
+            "dist\discord-clip-$v-setup.exe" `
+            "dist\discord-clip-$v-portable.exe" `
+            dist\latest.json `
+            dist\SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
