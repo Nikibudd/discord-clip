@@ -61,12 +61,25 @@ impl SettingsPage {
             set(Command::SetSeconds(secs.round() as u32));
         }
         ui.add_space(6.0);
-        let bytes = secs.round() as u64 * (crate::capture::SAMPLE_RATE as u64) * (crate::capture::CHANNELS as u64) * 2;
-        let mb = bytes as f32 / 1_000_000.0;
-        if bytes > 10 * 1024 * 1024 {
-            text(ui, format!("≈ {mb:.1} MB per clip: over Discord's 10 MB upload limit without Nitro."), 14.0, Weight::Regular, YELLOW);
+        // What's shared with Discord is always stereo; with separate tracks
+        // the file in the folder is twice that.
+        let shared = secs.round() as u64 * (crate::capture::SAMPLE_RATE as u64) * (crate::capture::CHANNELS as u64) * 2;
+        let mb = shared as f32 / 1_000_000.0;
+        let on_disk = if cfg.separate_tracks && cfg.mic {
+            format!(" ({:.1} MB in the folder with separate tracks)", mb * 2.0)
         } else {
-            text(ui, format!("≈ {mb:.1} MB per clip."), 14.0, Weight::Regular, TEXT_MUTED);
+            String::new()
+        };
+        if shared > 10 * 1024 * 1024 {
+            text(
+                ui,
+                format!("≈ {mb:.1} MB per clip{on_disk}: over Discord's 10 MB upload limit without Nitro."),
+                14.0,
+                Weight::Regular,
+                YELLOW,
+            );
+        } else {
+            text(ui, format!("≈ {mb:.1} MB per clip{on_disk}."), 14.0, Weight::Regular, TEXT_MUTED);
         }
 
         ui.add_space(24.0);
@@ -81,6 +94,17 @@ impl SettingsPage {
 
         ui.add_space(24.0);
         mic_picker(ui, snap);
+
+        ui.add_space(24.0);
+        let tracks_desc = if cfg.mic {
+            "Saves other people and your voice as separate tracks in each clip, so you can share just one of \
+             them later. Clips get about twice as big; copying a clip still gives Discord a normal mix."
+        } else {
+            "Only used while your microphone is recorded."
+        };
+        if row(ui, "Keep Discord and mic as separate tracks", tracks_desc, |ui| toggle(ui, cfg.separate_tracks)).clicked() {
+            set(Command::SetSeparateTracks(!cfg.separate_tracks));
+        }
 
         ui.add_space(24.0);
         let mut gain = self.gain_drag.unwrap_or(cfg.mic_gain.min(4.0));

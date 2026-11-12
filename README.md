@@ -8,6 +8,11 @@ you press the hotkey (**Ctrl+Alt+C** by default).
   client, so only Discord audio is recorded (no game/music/browser audio).
   Discord keeps playing to your speakers as normal.
 - **You:** your microphone is mixed in: by default Windows' default *communications* mic, or the one you pick in Settings.
+- **Separate tracks** (on by default): each clip keeps Discord and your mic as
+  separate tracks in one 4-channel WAV (labelled quad, so players that open it
+  directly mix it to stereo). Copying a clip still gives Discord a normal stereo
+  mix; the ⋯ menu can also copy just Discord or just your mic. About twice the
+  file size.
 - The saved clip is copied to the clipboard as a file, so **Ctrl+V in a Discord
   chat** attaches it. A notification confirms it; click it to show the file.
 - Clips are 16-bit 48 kHz stereo: 30 s is about 5.8 MB, under Discord's 10 MB
@@ -80,6 +85,7 @@ seconds = 30                 # 1-300
 mic = true
 mic_gain = 1
 mic_device =                 # empty = default communications mic; set from the app
+separate_tracks = true       # Discord + mic as separate tracks (4-channel clips)
 out_dir = C:\Users\you\Music\Discord Clips   # full path; %USERPROFILE% etc. allowed
 clipboard = true
 notifications = true

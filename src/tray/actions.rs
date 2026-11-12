@@ -25,7 +25,9 @@ pub(super) fn save_clip(app: &App) {
             let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let mut text = name;
             if cfg.clipboard {
-                match crate::clip::copy_file_to_clipboard(&path) {
+                // Clips with separate tracks are shared as a normal stereo mix.
+                let shared = crate::library::shareable_copy(&path, crate::library::Tracks::Both);
+                match shared.and_then(|p| crate::clip::copy_file_to_clipboard(&p)) {
                     Ok(()) => text.push_str("\nCopied: press Ctrl+V in Discord to send it."),
                     Err(e) => {
                         log!("clipboard copy failed: {e:#}");

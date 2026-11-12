@@ -15,6 +15,8 @@ pub struct Config {
     pub mic_gain: f32,
     /// Microphone endpoint id; empty = default communications device.
     pub mic_device: String,
+    /// Save Discord and the mic as separate tracks (a 4-channel clip).
+    pub separate_tracks: bool,
     pub out_dir: PathBuf,
     pub clipboard: bool,
     pub notifications: bool,
@@ -29,6 +31,7 @@ impl Default for Config {
             mic: true,
             mic_gain: 1.0,
             mic_device: String::new(),
+            separate_tracks: true,
             out_dir: default_out_dir(),
             clipboard: true,
             notifications: true,
@@ -128,6 +131,7 @@ impl Config {
             }
             "mic" => self.mic = parse_bool(key, v)?,
             "mic_device" => self.mic_device = v.to_string(),
+            "separate_tracks" => self.separate_tracks = parse_bool(key, v)?,
             "mic_gain" => {
                 let g: f32 = v.parse().context("mic_gain must be a number")?;
                 if !(0.0..=10.0).contains(&g) {
@@ -186,6 +190,11 @@ mic_gain = {}
 # communications microphone.
 mic_device = {}
 
+# Keep Discord audio and your mic as separate tracks in each clip (a
+# 4-channel file, about twice the size). Copying a clip still gives Discord
+# a normal stereo mix.
+separate_tracks = {}
+
 # Folder clips are saved in
 out_dir = {}
 
@@ -203,6 +212,7 @@ check_updates = {}
             self.mic,
             self.mic_gain,
             self.mic_device,
+            self.separate_tracks,
             self.out_dir.display(),
             self.clipboard,
             self.notifications,
@@ -251,6 +261,7 @@ mod tests {
         cfg.clipboard = false;
         cfg.notifications = false;
         cfg.check_updates = false;
+        cfg.separate_tracks = false;
         let (back, problems) = Config::parse(&cfg.to_text());
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(back, cfg);

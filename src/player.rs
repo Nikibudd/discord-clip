@@ -1,13 +1,14 @@
 //! Clip playback with pause and seeking, on the classic `waveOut` API.
 //!
-//! The whole clip is decoded into memory (a 30 s clip is ~5.8 MB) and handed
+//! The whole clip is decoded into memory as stereo (a 30 s clip is ~5.8 MB;
+//! clips with separate tracks are mixed) and handed
 //! to the sound card in one buffer starting at the play position. Seeking
 //! resets the device and queues the buffer again from the new position;
 //! `waveOutGetPosition` tells us how far it has played since.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use windows::core::PSTR;
 use windows::Win32::Media::Audio::{
     waveOutClose, waveOutGetPosition, waveOutOpen, waveOutPause, waveOutPrepareHeader, waveOutReset,
@@ -35,26 +36,16 @@ pub struct Playback {
 impl Playback {
     /// Loads `path` and starts playing at `fraction` (0..=1) of the clip.
     pub fn start(path: &Path, fraction: f32) -> Result<Playback> {
-        let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let spec = reader.spec();
-        let samples: Vec<i16> = match (spec.sample_format, spec.bits_per_sample) {
-            (hound::SampleFormat::Int, 16) => reader.samples::<i16>().collect::<Result<_, _>>()?,
-            (hound::SampleFormat::Int, bits) => {
-                let shift = bits.saturating_sub(16) as u32;
-                reader.samples::<i32>().map(|s| s.map(|v| (v >> shift) as i16)).collect::<Result<_, _>>()?
-            }
-            (hound::SampleFormat::Float, _) => reader
-                .samples::<f32>()
-                .map(|s| s.map(|v| (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16))
-                .collect::<Result<_, _>>()?,
-        };
-        let channels = spec.channels.max(1) as usize;
+        // Always stereo: clips with separate tracks are mixed for listening.
+        let (mixed, sample_rate) = crate::library::read_stereo(path, crate::library::Tracks::Both)?;
+        let samples: Vec<i16> = mixed.iter().map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).collect();
+        let channels = 2usize;
         let block_align = (channels * 2) as u16;
         let format = WAVEFORMATEX {
             wFormatTag: WAVE_FORMAT_PCM as u16,
             nChannels: channels as u16,
-            nSamplesPerSec: spec.sample_rate,
-            nAvgBytesPerSec: spec.sample_rate * block_align as u32,
+            nSamplesPerSec: sample_rate,
+            nAvgBytesPerSec: sample_rate * block_align as u32,
             nBlockAlign: block_align,
             wBitsPerSample: 16,
             cbSize: 0,
@@ -69,7 +60,7 @@ impl Playback {
             device,
             samples,
             channels,
-            sample_rate: spec.sample_rate.max(1),
+            sample_rate: sample_rate.max(1),
             start_frame: 0,
             header: Box::new(WAVEHDR::default()),
             queued: false,

@@ -94,6 +94,7 @@ pub(super) fn handle_ui_command(app: &App, cmd: Command) {
         Command::SetMicGain(g) => update_settings(app, |c| c.mic_gain = g.clamp(0.0, 10.0)),
         Command::SetClipboard(on) => update_settings(app, |c| c.clipboard = on),
         Command::SetNotifications(on) => update_settings(app, |c| c.notifications = on),
+        Command::SetSeparateTracks(on) => update_settings(app, |c| c.separate_tracks = on),
         Command::PickFolder => change_folder(app),
         Command::OpenFolder => open_clips_folder(app),
         Command::OpenLog => shell_open(&log::log_path()),
@@ -124,8 +125,9 @@ pub(super) fn handle_ui_command(app: &App, cmd: Command) {
                 shell_open(Path::new(&url));
             }
         }
-        Command::CopyClip(path) => {
-            if let Err(e) = crate::clip::copy_file_to_clipboard(&path) {
+        Command::CopyClip(path, tracks) => {
+            let shared = crate::library::shareable_copy(&path, tracks);
+            if let Err(e) = shared.and_then(|p| crate::clip::copy_file_to_clipboard(&p)) {
                 log!("clipboard copy failed: {e:#}");
                 notify(app, "Couldn't copy the clip", &format!("{e:#}"), true);
             }
