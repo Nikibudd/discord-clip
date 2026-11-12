@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use windows::core::PCWSTR;
 
 /// Number of bars in a clip's waveform.
@@ -19,9 +19,12 @@ pub struct ClipFile {
     pub modified: SystemTime,
     /// When it was saved, from the file name (local time).
     pub saved: Option<SavedAt>,
+    /// The name the user gave it (or the whole name of a file that doesn't
+    /// follow our naming).
+    pub name: Option<String>,
 }
 
-/// Local date and time parsed from `discord_clip_YYYYMMDD_HHMMSS.wav`.
+/// Local date and time parsed from `discord_clip_YYYYMMDD_HHMMSS[ name].wav`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SavedAt {
     pub year: u16,
@@ -52,18 +55,34 @@ pub fn scan(dir: &Path) -> Vec<ClipFile> {
                 return None;
             }
             let path = e.path();
-            let saved = path.file_name().and_then(|n| parse_saved_at(&n.to_string_lossy()));
-            Some(ClipFile { path, size: meta.len(), modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), saved })
+            let (saved, name) = split_clip_name(&path.file_stem()?.to_string_lossy());
+            Some(ClipFile { path, size: meta.len(), modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), saved, name })
         })
         .collect();
     clips.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.path.cmp(&a.path)));
     clips
 }
 
-pub fn parse_saved_at(name: &str) -> Option<SavedAt> {
-    let stamp = name.strip_prefix("discord_clip_")?.strip_suffix(".wav")?;
+/// File names start with this, then `YYYYMMDD_HHMMSS`, then optionally a
+/// custom name: `discord_clip_20261109_213151 Bob laughs.wav`.
+const PREFIX: &str = "discord_clip_";
+
+/// Splits a clip's file stem into when it was saved and its custom name.
+/// Files that don't follow our naming are all name, no date.
+pub fn split_clip_name(stem: &str) -> (Option<SavedAt>, Option<String>) {
+    if let Some(rest) = stem.strip_prefix(PREFIX) {
+        if let Some(at) = rest.get(..15).and_then(parse_stamp) {
+            let name = rest[15..].trim_start_matches([' ', '_', '-']).trim();
+            return (Some(at), (!name.is_empty()).then(|| name.to_string()));
+        }
+    }
+    (None, Some(stem.to_string()))
+}
+
+/// `YYYYMMDD_HHMMSS`
+fn parse_stamp(stamp: &str) -> Option<SavedAt> {
     let (date, time) = stamp.split_once('_')?;
-    if date.len() != 8 || time.len() < 6 || !date.bytes().chain(time.bytes()).all(|b| b.is_ascii_digit()) {
+    if date.len() != 8 || time.len() != 6 || !date.bytes().chain(time.bytes()).all(|b| b.is_ascii_digit()) {
         return None;
     }
     let n = |s: &str| s.parse::<u16>().ok();
@@ -76,6 +95,47 @@ pub fn parse_saved_at(name: &str) -> Option<SavedAt> {
         second: n(&time[4..6])? as u8,
     };
     ((1..=12).contains(&at.month) && (1..=31).contains(&at.day) && at.hour < 24 && at.minute < 60).then_some(at)
+}
+
+/// Makes a user-typed name safe for a Windows file name.
+fn sanitize_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_control() || r#"\/:*?"<>|"#.contains(c) { ' ' } else { c })
+        .collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Windows doesn't allow names ending in a dot or space.
+    collapsed.chars().take(100).collect::<String>().trim_end_matches(['.', ' ']).to_string()
+}
+
+/// Renames a clip to `name`, keeping its timestamp so it still sorts and
+/// shows its date: `discord_clip_<stamp> <name>.wav`. An empty name goes
+/// back to just the timestamp. Returns the new path.
+pub fn rename(path: &Path, name: &str) -> Result<PathBuf> {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "wav".into());
+    let dir = path.parent().context("clip has no folder")?;
+    let name = sanitize_name(name);
+    let stamp = stem.strip_prefix(PREFIX).and_then(|r| r.get(..15)).filter(|s| parse_stamp(s).is_some());
+    let new_stem = match (stamp, name.is_empty()) {
+        (Some(s), true) => format!("{PREFIX}{s}"),
+        (Some(s), false) => format!("{PREFIX}{s} {name}"),
+        (None, true) => bail!("the name can't be empty"),
+        (None, false) => name,
+    };
+    let same = |p: &Path| p.as_os_str().to_string_lossy().eq_ignore_ascii_case(&path.as_os_str().to_string_lossy());
+    let mut target = dir.join(format!("{new_stem}.{ext}"));
+    if target == path {
+        return Ok(target);
+    }
+    // Don't overwrite another clip (but a change of case is the same file).
+    let mut n = 2;
+    while target.exists() && !same(&target) {
+        target = dir.join(format!("{new_stem} ({n}).{ext}"));
+        n += 1;
+    }
+    std::fs::rename(path, &target).with_context(|| format!("renaming {}", path.display()))?;
+    Ok(target)
 }
 
 /// Reads a clip's length and waveform. Takes ~10 ms for a 30 s clip.
@@ -150,13 +210,55 @@ mod tests {
 
     #[test]
     fn parses_clip_names() {
-        assert_eq!(
-            parse_saved_at("discord_clip_20261109_213151.wav"),
-            Some(SavedAt { year: 2026, month: 11, day: 9, hour: 21, minute: 31, second: 51 })
-        );
-        assert_eq!(parse_saved_at("discord_clip_20261309_213151.wav"), None);
-        assert_eq!(parse_saved_at("my recording.wav"), None);
-        assert_eq!(parse_saved_at("discord_clip_2026_1.wav"), None);
+        let at = SavedAt { year: 2026, month: 11, day: 9, hour: 21, minute: 31, second: 51 };
+        assert_eq!(split_clip_name("discord_clip_20261109_213151"), (Some(at), None));
+        assert_eq!(split_clip_name("discord_clip_20261109_213151 Bob laughs"), (Some(at), Some("Bob laughs".into())));
+        // Older hand-made suffixes still get their date.
+        assert_eq!(split_clip_name("discord_clip_20261109_213151_backup"), (Some(at), Some("backup".into())));
+        assert_eq!(split_clip_name("discord_clip_20261309_213151"), (None, Some("discord_clip_20261309_213151".into())));
+        assert_eq!(split_clip_name("my recording"), (None, Some("my recording".into())));
+        assert_eq!(split_clip_name("discord_clip_2026_1"), (None, Some("discord_clip_2026_1".into())));
+    }
+
+    #[test]
+    fn sanitizes_names() {
+        assert_eq!(sanitize_name("  Bob: \"lol\"?  "), "Bob lol");
+        assert_eq!(sanitize_name("a/b\\c"), "a b c");
+        assert_eq!(sanitize_name("trailing dots..."), "trailing dots");
+        assert_eq!(sanitize_name("   "), "");
+    }
+
+    #[test]
+    fn renames_clips() {
+        let dir = std::env::temp_dir().join(format!("discord-clip-rename-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("discord_clip_20261109_213151.wav");
+        std::fs::write(&original, b"x").unwrap();
+
+        let named = rename(&original, "Bob: laughs?").unwrap();
+        assert_eq!(named.file_name().unwrap(), "discord_clip_20261109_213151 Bob laughs.wav");
+        assert!(!original.exists() && named.exists());
+
+        // Same name for another clip from the same second: no overwrite.
+        let twin = dir.join("discord_clip_20261109_213151 x.wav");
+        std::fs::write(&twin, b"y").unwrap();
+        let twin_named = rename(&twin, "Bob laughs").unwrap();
+        assert_eq!(twin_named.file_name().unwrap(), "discord_clip_20261109_213151 Bob laughs (2).wav");
+
+        // Only the case changes: same file.
+        let recased = rename(&named, "bob laughs").unwrap();
+        assert_eq!(recased.file_name().unwrap(), "discord_clip_20261109_213151 bob laughs.wav");
+
+        // Empty name: back to the plain timestamp.
+        let plain = rename(&recased, "  ").unwrap();
+        assert_eq!(plain.file_name().unwrap(), "discord_clip_20261109_213151.wav");
+
+        // A file without our timestamp needs a name.
+        let other = dir.join("other.wav");
+        std::fs::write(&other, b"z").unwrap();
+        assert!(rename(&other, "").is_err());
+        assert_eq!(rename(&other, "Renamed").unwrap().file_name().unwrap(), "Renamed.wav");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
