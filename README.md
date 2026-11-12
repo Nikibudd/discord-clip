@@ -18,16 +18,24 @@ you press the hotkey (**Ctrl+Alt+C** by default).
 
 Requires Windows 10 2004 (build 19041) or newer. Supports Discord, PTB and Canary.
 
+## Window
+
+Left-click the tray icon to open the Discord Clip window: a Discord-styled
+window with a sidebar of pages. Closing it just hides it again.
+
+- **Settings**: hotkey recorder (combos already taken by another app are
+  rejected), clip length, microphone on/off and volume, clips folder,
+  clipboard and notification toggles, and buttons to open/reload
+  `config.ini` and the log. Changes save immediately. Clip length and the
+  microphone switch apply after a restart; a bar offers to do that for you.
+
 ## Tray menu
 
-Right- or left-click the tray icon:
+Right-click the tray icon:
 
+- **Open Discord Clip**
 - **Save clip now**
 - **Open clips folder**
-- **Change hotkey...**: press the new combination in the picker. Combos
-  already taken by another app are rejected.
-- **Change clips folder...**: standard folder picker; saved permanently
-- **Edit settings file...** / **Reload settings**
 - **Open log**: `%LOCALAPPDATA%\discord-clip\discord-clip.log`
 - **Quit**
 
@@ -52,10 +60,12 @@ Command-line flags override the file for one run without changing it:
 ## Building
 
 With the MSVC toolchain this needs the "Desktop development with C++" workload
-(Build Tools for Visual Studio). Without it, the GNU toolchain works out of the
-box:
+(Build Tools for Visual Studio). Without it, use the GNU toolchain plus a full
+MinGW (the window's dependencies need a working `dlltool`, and the one rustup
+ships can't run on its own):
 
 ```
+scoop install mingw
 rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
 cargo +stable-x86_64-pc-windows-gnu build --release
 cargo +stable-x86_64-pc-windows-gnu test
@@ -69,7 +79,8 @@ it from the tray before copying a new build over it).
 | File | Role |
 | --- | --- |
 | `src/main.rs` | Startup, single-instance check, CLI overrides, Discord supervisor thread |
-| `src/tray.rs` | Tray icon (drawn at runtime), menu, notifications, hotkey dialog, folder picker |
+| `src/tray.rs` | Tray icon (drawn at runtime), menu, notifications, global hotkey, folder picker; applies changes requested by the window |
+| `src/ui.rs` | The window (egui, on its own thread): Discord-styled sidebar + Settings page; sends commands to the tray thread and draws the snapshot it publishes back |
 | `src/config.rs` | `config.ini` load/save/validation |
 | `src/hotkey.rs` | Parsing/formatting `Ctrl+Alt+C`-style hotkeys |
 | `src/capture.rs` | Finds the root Discord process; process-loopback / mic WASAPI streams in a fixed 48 kHz stereo format, event-driven; pads silence when the stream goes quiet so the buffer stays in step with real time |
