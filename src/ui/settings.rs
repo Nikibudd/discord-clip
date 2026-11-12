@@ -124,6 +124,30 @@ impl SettingsPage {
 
         divider(ui);
 
+        // Startup
+        section_label(ui, "Startup");
+        use crate::autostart::State;
+        let on = snap.autostart == State::On;
+        let other;
+        let desc = match &snap.autostart {
+            State::OtherCopy(path) => {
+                other = format!(
+                    "Windows currently starts a different copy: {}. Turn this on to start this one instead.",
+                    path.display()
+                );
+                other.as_str()
+            }
+            State::DisabledByWindows => {
+                "Switched off in Task Manager's Startup apps. Turn it on here to start Discord Clip again."
+            }
+            _ => "Start Discord Clip in the tray when you sign in, so it's always ready to save a clip.",
+        };
+        if row(ui, "Start with Windows", desc, |ui| toggle(ui, on)).clicked() {
+            set(Command::SetAutostart(!on));
+        }
+
+        divider(ui);
+
         // Advanced
         section_label(ui, "Advanced");
         text(

@@ -12,6 +12,7 @@
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod autostart;
 mod capture;
 mod clip;
 mod config;

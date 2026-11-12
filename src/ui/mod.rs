@@ -70,6 +70,8 @@ pub enum Command {
     ShowClip(PathBuf),
     /// Move a clip to the Recycle Bin.
     DeleteClip(PathBuf),
+    /// Start this exe when signing in to Windows.
+    SetAutostart(bool),
 }
 
 /// Everything the window shows, published by the tray thread.
@@ -88,6 +90,8 @@ pub struct Snapshot {
     pub update: crate::update::Status,
     /// Installed copy (updates via installer) rather than a portable exe.
     pub installed: bool,
+    /// "Start with Windows", read from the registry.
+    pub autostart: crate::autostart::State,
 }
 
 struct Shared {
@@ -273,15 +277,17 @@ impl ClipWindow {
 /// for the tray thread to publish it back.
 fn set(cmd: Command) {
     {
-        let mut snap = shared().snapshot.lock().unwrap();
-        let cfg = &mut snap.cfg;
+        let snap = &mut *shared().snapshot.lock().unwrap();
         match &cmd {
-            Command::SetSeconds(s) => cfg.seconds = *s,
-            Command::SetMic(m) => cfg.mic = *m,
-            Command::SetMicGain(g) => cfg.mic_gain = *g,
-            Command::SetClipboard(c) => cfg.clipboard = *c,
-            Command::SetNotifications(n) => cfg.notifications = *n,
-            Command::SetCheckUpdates(c) => cfg.check_updates = *c,
+            Command::SetSeconds(s) => snap.cfg.seconds = *s,
+            Command::SetMic(m) => snap.cfg.mic = *m,
+            Command::SetMicGain(g) => snap.cfg.mic_gain = *g,
+            Command::SetClipboard(c) => snap.cfg.clipboard = *c,
+            Command::SetNotifications(n) => snap.cfg.notifications = *n,
+            Command::SetCheckUpdates(c) => snap.cfg.check_updates = *c,
+            Command::SetAutostart(on) => {
+                snap.autostart = if *on { crate::autostart::State::On } else { crate::autostart::State::Off }
+            }
             _ => {}
         }
     }

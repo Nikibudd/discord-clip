@@ -34,6 +34,7 @@ pub(super) fn snapshot(app: &App) -> Snapshot {
         hotkey_error: app.hotkey_error.borrow().clone(),
         update: update::status(),
         installed: update::is_installed(),
+        autostart: crate::autostart::state(),
     }
 }
 
@@ -122,6 +123,13 @@ pub(super) fn handle_ui_command(app: &App, cmd: Command) {
             }
         }
         Command::ShowClip(path) => show_in_folder(&path),
+        Command::SetAutostart(on) => match crate::autostart::set(on) {
+            Ok(()) => log!("start with Windows: {on}"),
+            Err(e) => {
+                log!("{e:#}");
+                notify(app, "Couldn't change start with Windows", &format!("{e:#}"), true);
+            }
+        },
         Command::DeleteClip(path) => match crate::library::recycle(&path) {
             Ok(()) => log!("moved {} to the Recycle Bin", path.display()),
             Err(e) => {
