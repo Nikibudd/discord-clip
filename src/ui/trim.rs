@@ -237,10 +237,16 @@ impl TrimDialog {
         let font_id = font(13.0, Weight::Semibold);
         let start_label = ui.painter().layout_no_wrap(clock_precise(self.start * self.seconds), font_id.clone(), HEADER_SECONDARY);
         let end_label = ui.painter().layout_no_wrap(clock_precise(self.end * self.seconds), font_id, HEADER_SECONDARY);
-        let sx = (x_at(self.start) - start_label.size().x / 2.0).clamp(row.left(), row.right() - start_label.size().x);
-        let ex = (x_at(self.end) - end_label.size().x / 2.0).clamp(sx + start_label.size().x + 8.0, row.right() - end_label.size().x);
+        let (sx, ex) = place_labels(
+            x_at(self.start),
+            x_at(self.end),
+            start_label.size().x,
+            end_label.size().x,
+            row.left(),
+            row.right(),
+        );
         ui.painter().galley(pos2(sx, row.top()), start_label, HEADER_SECONDARY);
-        ui.painter().galley(pos2(ex.min(row.right() - end_label.size().x), row.top()), end_label, HEADER_SECONDARY);
+        ui.painter().galley(pos2(ex, row.top()), end_label, HEADER_SECONDARY);
     }
 
     fn toggle_play(&mut self) {
@@ -271,5 +277,51 @@ impl TrimDialog {
         } else if !p.is_paused() {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
+    }
+}
+
+/// Left edges for the start and end time labels: centred under their handles
+/// where possible, inside `left..right`, and not overlapping (when the
+/// handles are close, they push each other apart, inward at the edges).
+/// Never panics, whatever the inputs (#6 crash: `clamp` with min > max).
+fn place_labels(start_x: f32, end_x: f32, start_w: f32, end_w: f32, left: f32, right: f32) -> (f32, f32) {
+    const GAP: f32 = 8.0;
+    let within = |x: f32, w: f32| x.min(right - w).max(left);
+    let mut sx = within(start_x - start_w / 2.0, start_w);
+    let mut ex = within(end_x - end_w / 2.0, end_w);
+    if ex < sx + start_w + GAP {
+        // Overlap: put the pair side by side around their middle, then
+        // shift the pair back inside the row.
+        let total = start_w + GAP + end_w;
+        let middle = (start_x + end_x) / 2.0;
+        sx = (middle - total / 2.0).min(right - total).max(left);
+        ex = sx + start_w + GAP;
+    }
+    (sx, ex)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::place_labels;
+
+    #[test]
+    fn labels_never_overlap_or_leave_the_row() {
+        let (left, right, w) = (100.0, 700.0, 46.0);
+        // Every combination of handle positions, including both at the far
+        // right (the crash) and both at the far left.
+        for s in 0..=60 {
+            for e in s..=60 {
+                let sx_handle = left + (right - left) * s as f32 / 60.0;
+                let ex_handle = left + (right - left) * e as f32 / 60.0;
+                let (sx, ex) = place_labels(sx_handle, ex_handle, w, w, left, right);
+                assert!(sx >= left - 0.01, "start label left of the row: {s} {e}");
+                assert!(ex + w <= right + 0.01, "end label right of the row: {s} {e}");
+                assert!(ex >= sx + w + 7.99, "labels overlap: {s} {e}");
+            }
+        }
+        // Far apart: centred under the handles.
+        assert_eq!(place_labels(200.0, 600.0, w, w, left, right), (177.0, 577.0));
+        // A row too narrow for both still doesn't panic.
+        let _ = place_labels(110.0, 120.0, w, w, 100.0, 140.0);
     }
 }

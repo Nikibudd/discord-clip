@@ -160,6 +160,12 @@ fn main() {
     };
 
     log::init();
+    // Release builds abort on panic without a trace (no console): write what
+    // and where to the log first.
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current().name().unwrap_or("?").to_string();
+        log!("crash in thread {thread}: {info}");
+    }));
     update::init();
     log!("discord-clip {} starting", env!("CARGO_PKG_VERSION"));
 
