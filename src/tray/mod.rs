@@ -209,6 +209,9 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
         register_hotkey(&app);
 
         let updated_from = crate::update::note_version();
+        // First start after an update (from the window, or a newer installer
+        // run by hand): open the window so the user sees it worked.
+        let reopen = updated_from.is_some();
         let warnings = app.startup_warnings.join("\n");
         if !warnings.is_empty() {
             notify(&app, "Discord Clip: check your settings", &warnings, true);
@@ -220,7 +223,7 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
                 &format!("Discord Clip updated to {}", crate::update::CURRENT),
                 &format!("Updated from {prev}. Click to see the release notes."),
             );
-        } else if app.hotkey_registered.get() && !app.open_window {
+        } else if app.hotkey_registered.get() && !app.open_window && !reopen {
             let cfg = app.cfg.borrow().clone();
             notify(
                 &app,
@@ -229,7 +232,10 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
                 false,
             );
         }
-        if app.open_window {
+        if reopen {
+            log!("reopening the window after the update");
+            ui::open_page(snapshot(&app), ui::Page::Updates);
+        } else if app.open_window {
             ui::open(snapshot(&app));
         }
 

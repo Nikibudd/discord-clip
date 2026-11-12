@@ -12,6 +12,11 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, icon: &TextureHandle) {
     text(ui, "Updates", 20.0, Weight::Bold, HEADER_PRIMARY);
     ui.add_space(20.0);
 
+    if let Some(prev) = &snap.update.updated_from {
+        updated_banner(ui, prev);
+        ui.add_space(16.0);
+    }
+
     // Card: app, version and what's going on.
     Frame::new()
         .fill(BG_SECONDARY)
@@ -140,4 +145,30 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, icon: &TextureHandle) {
     {
         set(Command::SetCheckUpdates(!snap.cfg.check_updates));
     }
+}
+
+/// Green "Updated from X to Y" banner, shown after an update (the window
+/// opens on this page when the update was started from here).
+fn updated_banner(ui: &mut Ui, prev: &str) {
+    Frame::new()
+        .fill(mix(BG_SECONDARY, GREEN, 0.15))
+        .stroke(egui::Stroke::new(1.0, mix(BG_SECONDARY, GREEN, 0.5)))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            let width = ui.available_width();
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, 32.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if button(ui, "What's new", ButtonKind::Secondary).clicked() {
+                        send(Command::OpenUrl(crate::update::current_notes_url()));
+                    }
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        status_line(ui, Some(GREEN), &format!("Updated from {prev} to {CURRENT}."), HEADER_PRIMARY);
+                    });
+                },
+            );
+        });
 }

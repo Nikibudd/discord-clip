@@ -53,8 +53,8 @@ installed until you click **Update now**:
   swaps it in for the running file (the old one is kept as `.old` until the
   next start) and restarts.
 
-The first start after an update shows a "Discord Clip updated to X"
-notification.
+The first start after an update opens the window on the Updates page with an
+"Updated from X to Y" banner (and a "What's new" link), plus a notification.
 
 ## Tray menu
 
