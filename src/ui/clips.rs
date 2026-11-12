@@ -820,7 +820,8 @@ fn time_bubble(ui: &Ui, x: f32, panel: Rect, label: &str) {
     let painter: Painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("scrub-time")));
     let galley = painter.layout_no_wrap(label.to_string(), font(12.0, Weight::Bold), Color32::WHITE);
     let size = galley.size() + vec2(10.0, 4.0);
-    let left = (x - size.x / 2.0).clamp(panel.left() + 2.0, panel.right() - size.x - 2.0);
+    // min/max instead of clamp: clamp panics if the panel is narrower than the label.
+    let left = (x - size.x / 2.0).min(panel.right() - size.x - 2.0).max(panel.left() + 2.0);
     let rect = Rect::from_min_size(pos2(left, panel.top() - size.y - 4.0), size);
     painter.rect_filled(rect, CornerRadius::same(4), BG_FLOATING);
     painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
