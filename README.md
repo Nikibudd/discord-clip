@@ -28,6 +28,27 @@ window with a sidebar of pages. Closing it just hides it again.
   clipboard and notification toggles, and buttons to open/reload
   `config.ini` and the log. Changes save immediately. Clip length and the
   microphone switch apply after a restart; a bar offers to do that for you.
+- **Updates**: current version, "Check for updates", and **Update now** when
+  a newer release exists (with download progress and release notes link),
+  plus the automatic-check toggle.
+
+## Updates
+
+With `check_updates = true` (the default) the app checks GitHub 20 seconds
+after starting and then every 6 hours. When a newer release is out, a
+notification appears (once per version; clicking it opens the Updates page)
+and the sidebar's Updates entry gets a badge. Nothing is downloaded or
+installed until you click **Update now**:
+
+- **Installed copy** (`%LOCALAPPDATA%\Programs\discord-clip`): downloads the
+  release's installer, checks its SHA-256 against `latest.json`, runs it
+  silently and quits; the installer replaces the exe and starts it again.
+- **Portable exe** (anywhere else): downloads the new portable exe, checks it,
+  swaps it in for the running file (the old one is kept as `.old` until the
+  next start) and restarts.
+
+The first start after an update shows a "Discord Clip updated to X"
+notification.
 
 ## Tray menu
 
@@ -51,6 +72,7 @@ mic_gain = 1
 out_dir = C:\Users\you\Music\Discord Clips   # full path; %USERPROFILE% etc. allowed
 clipboard = true
 notifications = true
+check_updates = true         # look for new versions (never installs without asking)
 ```
 
 Command-line flags override the file for one run without changing it:
@@ -137,7 +159,8 @@ it from the tray before copying a new build over it).
 | --- | --- |
 | `src/main.rs` | Startup, single-instance check, CLI overrides, Discord supervisor thread |
 | `src/tray.rs` | Tray icon (drawn at runtime), menu, notifications, global hotkey, folder picker; applies changes requested by the window |
-| `src/ui.rs` | The window (egui, on its own thread): Discord-styled sidebar + Settings page; sends commands to the tray thread and draws the snapshot it publishes back |
+| `src/ui.rs` | The window (egui, on its own thread): Discord-styled sidebar with Settings and Updates pages; sends commands to the tray thread and draws the snapshot it publishes back |
+| `src/update.rs` | Update checks and in-app updates: fetches `latest.json` over WinHTTP, downloads + SHA-256-verifies the installer or portable exe, hands over to it |
 | `src/config.rs` | `config.ini` load/save/validation |
 | `src/hotkey.rs` | Parsing/formatting `Ctrl+Alt+C`-style hotkeys |
 | `src/capture.rs` | Finds the root Discord process; process-loopback / mic WASAPI streams in a fixed 48 kHz stereo format, event-driven; pads silence when the stream goes quiet so the buffer stays in step with real time |

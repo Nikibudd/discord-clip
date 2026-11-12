@@ -16,6 +16,7 @@ pub struct Config {
     pub out_dir: PathBuf,
     pub clipboard: bool,
     pub notifications: bool,
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -28,6 +29,7 @@ impl Default for Config {
             out_dir: default_out_dir(),
             clipboard: true,
             notifications: true,
+            check_updates: true,
         }
     }
 }
@@ -132,6 +134,7 @@ impl Config {
             "out_dir" => self.out_dir = resolve_out_dir(v)?,
             "clipboard" => self.clipboard = parse_bool(key, v)?,
             "notifications" => self.notifications = parse_bool(key, v)?,
+            "check_updates" => self.check_updates = parse_bool(key, v)?,
             _ => bail!("unknown setting '{key}'"),
         }
         Ok(())
@@ -183,6 +186,9 @@ clipboard = {}
 
 # Show a notification when a clip is saved
 notifications = {}
+
+# Check GitHub for new versions (nothing is installed without asking)
+check_updates = {}
 ",
             self.hotkey,
             self.seconds,
@@ -190,7 +196,8 @@ notifications = {}
             self.mic_gain,
             self.out_dir.display(),
             self.clipboard,
-            self.notifications
+            self.notifications,
+            self.check_updates
         )
     }
 
@@ -233,6 +240,7 @@ mod tests {
         cfg.out_dir = PathBuf::from(r"D:\Clips Here");
         cfg.clipboard = false;
         cfg.notifications = false;
+        cfg.check_updates = false;
         let (back, problems) = Config::parse(&cfg.to_text());
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(back, cfg);

@@ -20,6 +20,7 @@ mod log;
 mod ringbuffer;
 mod tray;
 mod ui;
+mod update;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -155,6 +156,7 @@ fn main() {
     };
 
     log::init();
+    update::init();
     log!("discord-clip {} starting", env!("CARGO_PKG_VERSION"));
 
     let cfg_path = config::config_path();
@@ -195,6 +197,9 @@ fn main() {
         (None, "off".to_string())
     };
 
+    update::AUTO.store(cfg.check_updates, Ordering::SeqCst);
+    update::spawn_auto_checker(Arc::clone(&running));
+
     let discord_status = Arc::new(Mutex::new(DiscordStatus::Waiting));
     let supervisor = {
         let ring = Arc::clone(&discord_ring);
@@ -230,7 +235,8 @@ fn main() {
 
     if exit == tray::Exit::Restart {
         // Same command-line overrides, and bring the settings window back.
-        let exe = std::env::current_exe().expect("current exe");
+        // Recorded at startup: after a portable update the running file was renamed.
+        let exe = update::exe_path();
         let args = std::env::args_os().skip(1).filter(|a| a != "--settings");
         if let Err(e) = std::process::Command::new(exe).args(args).arg("--settings").spawn() {
             fatal(&format!("Couldn't restart: {e}"));

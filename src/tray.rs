@@ -35,6 +35,7 @@ use crate::ui::{self, Command, Snapshot};
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_STATUS: u32 = WM_APP + 2;
 const WM_UI_COMMAND: u32 = WM_APP + 3;
+const WM_UPDATE_READY: u32 = WM_APP + 4;
 const NIN_BALLOONUSERCLICK: u32 = WM_USER + 5;
 const HOTKEY_ID: i32 = 1;
 const TRAY_UID: u32 = 1;
@@ -65,6 +66,18 @@ pub fn post_status_changed() {
 /// Tells the tray thread the window has queued commands. Callable from any thread.
 pub fn post_ui_command() {
     post(WM_UI_COMMAND);
+}
+
+/// Tells the tray thread a downloaded update is ready to install. Callable from any thread.
+pub fn post_update_ready() {
+    post(WM_UPDATE_READY);
+}
+
+/// What clicking the last notification does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Balloon {
+    ShowClip,
+    OpenUpdates,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -99,6 +112,9 @@ pub struct App {
     /// Why the last hotkey change from the window failed.
     hotkey_error: RefCell<Option<String>>,
     last_clip: RefCell<Option<PathBuf>>,
+    balloon: Cell<Balloon>,
+    /// Version we already showed an "update available" notification for.
+    notified_update: RefCell<Option<String>>,
     taskbar_created: Cell<u32>,
     icon_active: Cell<HICON>,
     icon_idle: Cell<HICON>,
@@ -134,6 +150,8 @@ impl App {
             hotkey_registered: Cell::new(false),
             hotkey_error: RefCell::new(None),
             last_clip: RefCell::new(None),
+            balloon: Cell::new(Balloon::ShowClip),
+            notified_update: RefCell::new(None),
             taskbar_created: Cell::new(0),
             icon_active: Cell::new(HICON::default()),
             icon_idle: Cell::new(HICON::default()),
@@ -194,9 +212,18 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
         tray_add(&app);
         register_hotkey(&app);
 
+        let updated_from = crate::update::note_version();
         let warnings = app.startup_warnings.join("\n");
         if !warnings.is_empty() {
             notify(&app, "Discord Clip: check your settings", &warnings, true);
+        } else if let Some(prev) = updated_from {
+            app.balloon.set(Balloon::OpenUpdates);
+            log!("updated from {prev} to {}", crate::update::CURRENT);
+            notify_always(
+                &app,
+                &format!("Discord Clip updated to {}", crate::update::CURRENT),
+                &format!("Updated from {prev}. Click to see the release notes."),
+            );
         } else if app.hotkey_registered.get() && !app.open_window {
             let cfg = app.cfg.borrow().clone();
             notify(
@@ -235,13 +262,18 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
         WM_TRAY => match lparam.0 as u32 & 0xFFFF {
             WM_LBUTTONUP => ui::open(snapshot(&app)),
             WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(&app),
-            NIN_BALLOONUSERCLICK => show_last_clip(&app),
+            NIN_BALLOONUSERCLICK => match app.balloon.get() {
+                Balloon::ShowClip => show_last_clip(&app),
+                Balloon::OpenUpdates => ui::open_page(snapshot(&app), ui::Page::Updates),
+            },
             _ => {}
         },
         WM_STATUS => {
             tray_update(&app);
+            notify_update_available(&app);
             ui::publish(snapshot(&app));
         }
+        WM_UPDATE_READY => install_update(&app),
         WM_UI_COMMAND => {
             for cmd in ui::take_commands() {
                 handle_ui_command(&app, cmd);
@@ -346,6 +378,19 @@ fn notify(app: &App, title: &str, text: &str, warning: bool) {
     copy_wide(&mut nid.szInfoTitle, title);
     copy_wide(&mut nid.szInfo, text);
     nid.dwInfoFlags = if warning { NIIF_WARNING } else { NIIF_INFO } | NIIF_NOSOUND;
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+/// An info notification that ignores the "show notifications" setting
+/// (that one is about saved clips). For rare things like updates.
+fn notify_always(app: &App, title: &str, text: &str) {
+    let mut nid = base_nid(app);
+    nid.uFlags = NIF_INFO;
+    copy_wide(&mut nid.szInfoTitle, title);
+    copy_wide(&mut nid.szInfo, text);
+    nid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
     unsafe {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
@@ -517,6 +562,33 @@ fn snapshot(app: &App) -> Snapshot {
         mic: app.mic_status.clone(),
         hotkey_registered: app.hotkey_registered.get(),
         hotkey_error: app.hotkey_error.borrow().clone(),
+        update: crate::update::status(),
+        installed: crate::update::is_installed(),
+    }
+}
+
+/// Once per new version: "update available" notification. Clicking it opens
+/// the Updates page.
+fn notify_update_available(app: &App) {
+    let crate::update::State::Available(m) = crate::update::status().state else { return };
+    if app.notified_update.borrow().as_deref() == Some(m.version.as_str()) {
+        return;
+    }
+    *app.notified_update.borrow_mut() = Some(m.version.clone());
+    app.balloon.set(Balloon::OpenUpdates);
+    notify_always(
+        app,
+        &format!("Discord Clip {} is available", m.version),
+        &format!("You have {}. Click to update.", crate::update::CURRENT),
+    );
+}
+
+/// A downloaded update is verified: hand over to it and quit.
+fn install_update(app: &App) {
+    match crate::update::apply() {
+        Ok(crate::update::Applied::Installer) => quit(app, Exit::Quit),
+        Ok(crate::update::Applied::Replaced) => quit(app, Exit::Restart),
+        Err(e) => notify(app, "Couldn't install the update", &format!("{e:#}"), true),
     }
 }
 
@@ -558,6 +630,20 @@ fn handle_ui_command(app: &App, cmd: Command) {
         Command::Restart => {
             log!("restarting to apply settings");
             quit(app, Exit::Restart);
+        }
+        Command::SetCheckUpdates(on) => {
+            update_settings(app, |c| c.check_updates = on);
+            crate::update::AUTO.store(on, Ordering::SeqCst);
+            if on && crate::update::status().last_checked.is_none() {
+                crate::update::check_now();
+            }
+        }
+        Command::CheckUpdates => crate::update::check_now(),
+        Command::InstallUpdate => crate::update::start_download(),
+        Command::OpenUrl(url) => {
+            if url.starts_with("https://") {
+                shell_open(Path::new(&url));
+            }
         }
     }
 }
@@ -605,6 +691,7 @@ fn save_clip(app: &App) {
             }
             text.push_str("\nClick to show it in its folder.");
             *app.last_clip.borrow_mut() = Some(path);
+            app.balloon.set(Balloon::ShowClip);
             notify(app, "Clip saved", &text, false);
         }
         Err(e) => {
