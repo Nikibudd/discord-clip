@@ -59,15 +59,26 @@ Command-line flags override the file for one run without changing it:
 
 ## Releases
 
-GitHub Actions (`.github/workflows/build.yml`) builds and tests every push and
-attaches the installer + portable exe to the run as an artifact.
+GitHub Actions builds and tests every push (`ci.yml`) and attaches the
+installer + portable exe to the run as an artifact, versioned
+`X.Y.Z-dev.g<commit>`.
 
-To release:
+Releases are published from `main` when a pull request is merged
+(`release.yml`). The PR description decides the version, via its
+`Release:` line (the PR template adds one):
 
-1. Bump `version` in `Cargo.toml` (e.g. `0.3.0`) on `develop`, merge to `main`.
-2. Tag it: `git tag v0.3.0 && git push origin v0.3.0`. The tag must match
-   `Cargo.toml`, or the build fails. A version with a suffix (`0.4.0-beta.1`)
-   becomes a pre-release.
+| `Release:` | Publishes |
+| --- | --- |
+| `patch` / `minor` / `major` | The latest release bumped, e.g. 0.3.0 → 0.3.1 / 0.4.0 / 1.0.0 |
+| `1.2.3` | Exactly that version. `1.2.3-beta.1` is a pre-release (doesn't count as "latest") |
+| `none`, or no line | Nothing |
+
+While the PR is open, its **release version** check shows what the merge will
+publish, and fails on an invalid line (unknown word, not newer than the latest
+release, tag already exists). After the merge the version is stamped into the
+build, the merge commit is tagged `vX.Y.Z`, and the bot comments the release
+link on the PR. The `version` in `Cargo.toml` is only used for local and dev
+builds; nothing is committed back.
 
 The release gets:
 

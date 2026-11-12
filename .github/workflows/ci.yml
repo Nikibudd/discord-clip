@@ -1,0 +1,20 @@
+# Dev build of every push: tests + installer/portable exe as a workflow
+# artifact. Never publishes (releases come from release.yml).
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
