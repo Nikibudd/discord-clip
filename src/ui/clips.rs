@@ -1,5 +1,6 @@
 //! The Clips page: the clips folder as a grid of cards, each with a
-//! waveform you can click to play, and Copy / Show / Delete buttons.
+//! waveform player (play/pause, click or drag on the waveform to scrub) and
+//! Copy / Show / Delete buttons.
 //!
 //! Listing the folder is cheap and redone every couple of seconds while the
 //! page is open, so new clips appear on their own. Reading a clip's waveform
@@ -13,13 +14,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui::{
-    self, pos2, vec2, Align, Align2, Color32, CornerRadius, CursorIcon, Frame, Layout, Margin, Rect, Sense, Ui,
+    self, pos2, vec2, Align, Align2, Color32, CornerRadius, CursorIcon, Frame, Layout, Margin, Painter, Rect, Sense,
+    Stroke, Ui,
 };
 
 use super::theme::*;
 use super::widgets::*;
 use super::{send, Command, Snapshot};
 use crate::library::{self, Analysis, ClipFile, SavedAt};
+use crate::player::Playback;
 
 const RESCAN_EVERY: Duration = Duration::from_secs(2);
 const TILE_MIN_WIDTH: f32 = 250.0;
@@ -31,12 +34,6 @@ const BYTES_PER_SEC: f32 = 48_000.0 * 2.0 * 2.0;
 
 type Analyses = Arc<Mutex<HashMap<PathBuf, (SystemTime, Result<Analysis, String>)>>>;
 
-struct Playing {
-    path: PathBuf,
-    started: Instant,
-    seconds: f32,
-}
-
 #[derive(Default)]
 pub struct ClipsPage {
     dir: Option<PathBuf>,
@@ -46,25 +43,42 @@ pub struct ClipsPage {
     /// Sent to the worker (path, modified) and not re-sent until it changes.
     queued: HashMap<PathBuf, SystemTime>,
     worker: Option<Sender<(PathBuf, SystemTime)>>,
-    playing: Option<Playing>,
+    /// The clip that's playing or paused (only one at a time).
+    player: Option<Playback>,
     /// Deleted from the page; hidden until the next scan confirms it.
     deleted: HashSet<PathBuf>,
     toast: Option<(String, Instant)>,
 }
 
 enum Action {
-    Play,
+    /// Play button: play, pause or resume.
+    Toggle,
+    /// Clicked / let go on the waveform at this point (0..=1).
+    Seek(f32),
     Copy,
     Show,
     Delete,
 }
 
+/// How a card's player looks this frame.
+#[derive(Clone, Copy, Default)]
+struct PlayerView {
+    /// This clip is loaded in the player.
+    active: bool,
+    playing: bool,
+    /// Playback position, 0..=1.
+    position: f32,
+}
+
 impl ClipsPage {
     /// Stops playback (e.g. when the window is hidden).
     pub fn stop(&mut self) {
-        if self.playing.take().is_some() {
-            library::stop();
-        }
+        // Dropping the playback stops the device.
+        self.player = None;
+    }
+
+    fn is_loaded(&self, clip: &ClipFile) -> bool {
+        self.player.as_ref().is_some_and(|p| p.path() == clip.path)
     }
 
     pub fn show(&mut self, ui: &mut Ui, snap: &Snapshot) {
@@ -127,13 +141,14 @@ impl ClipsPage {
         }
     }
 
+    /// At the end of a clip, go back to the start like Discord's player.
     fn update_playing(&mut self, ctx: &egui::Context) {
-        if let Some(p) = &self.playing {
-            if p.started.elapsed().as_secs_f32() >= p.seconds {
-                self.playing = None;
-            } else {
-                ctx.request_repaint_after(Duration::from_millis(33));
-            }
+        let Some(p) = &self.player else { return };
+        if p.finished() {
+            self.player = None;
+        } else if !p.is_paused() {
+            // Smooth playhead.
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
 
@@ -153,49 +168,69 @@ impl ClipsPage {
                     .get(&clip.path)
                     .filter(|(modified, _)| *modified == clip.modified)
                     .map(|(_, a)| a);
-                let progress = self
-                    .playing
-                    .as_ref()
-                    .filter(|p| p.path == clip.path)
-                    .map(|p| (p.started.elapsed().as_secs_f32() / p.seconds.max(0.01)).clamp(0.0, 1.0));
-                if let Some(action) = tile(ui, rect, clip, analysis, progress, today) {
-                    self.act(action, clip, analysis);
+                let view = match &self.player {
+                    Some(p) if p.path() == clip.path => {
+                        PlayerView { active: true, playing: !p.is_paused(), position: p.position() }
+                    }
+                    _ => PlayerView::default(),
+                };
+                if let Some(action) = tile(ui, rect, clip, analysis, view, today) {
+                    self.act(action, clip);
                 }
             }
             ui.add_space(GAP);
         }
     }
 
-    fn act(&mut self, action: Action, clip: &ClipFile, analysis: Option<&Result<Analysis, String>>) {
-        match action {
-            Action::Play => {
-                if self.playing.as_ref().is_some_and(|p| p.path == clip.path) {
-                    self.stop();
-                } else {
-                    let seconds = match analysis {
-                        Some(Ok(a)) => a.seconds,
-                        _ => clip.size as f32 / BYTES_PER_SEC,
-                    };
-                    match library::play(&clip.path) {
-                        Ok(()) => self.playing = Some(Playing { path: clip.path.clone(), started: Instant::now(), seconds }),
-                        Err(e) => self.toast = Some((format!("{e:#}"), Instant::now())),
+    fn act(&mut self, action: Action, clip: &ClipFile) {
+        let result = match action {
+            Action::Toggle => match &mut self.player {
+                Some(p) if p.path() == clip.path => {
+                    if p.is_paused() {
+                        p.resume()
+                    } else {
+                        p.pause();
+                        Ok(())
                     }
                 }
-            }
+                _ => self.load(clip, 0.0),
+            },
+            // Seeking a loaded clip keeps it playing or paused; seeking
+            // another one starts it there.
+            Action::Seek(at) => match &mut self.player {
+                Some(p) if p.path() == clip.path => p.seek(at),
+                _ => self.load(clip, at),
+            },
             Action::Copy => {
                 send(Command::CopyClip(clip.path.clone()));
                 self.toast = Some(("Copied. Paste it into a Discord chat with Ctrl+V.".into(), Instant::now()));
+                Ok(())
             }
-            Action::Show => send(Command::ShowClip(clip.path.clone())),
+            Action::Show => {
+                send(Command::ShowClip(clip.path.clone()));
+                Ok(())
+            }
             Action::Delete => {
-                if self.playing.as_ref().is_some_and(|p| p.path == clip.path) {
+                if self.is_loaded(clip) {
                     self.stop();
                 }
                 self.deleted.insert(clip.path.clone());
                 send(Command::DeleteClip(clip.path.clone()));
                 self.toast = Some(("Moved to the Recycle Bin.".into(), Instant::now()));
+                Ok(())
             }
+        };
+        if let Err(e) = result {
+            crate::log!("playback failed: {e:#}");
+            self.toast = Some((format!("Couldn't play the clip: {e:#}"), Instant::now()));
         }
+    }
+
+    /// Loads `clip` into the player (stopping any other) and plays from `at`.
+    fn load(&mut self, clip: &ClipFile, at: f32) -> anyhow::Result<()> {
+        self.player = None;
+        self.player = Some(Playback::start(&clip.path, at)?);
+        Ok(())
     }
 
     /// A short message floating at the bottom, like Discord's toasts.
@@ -267,67 +302,94 @@ fn tile(
     rect: Rect,
     clip: &ClipFile,
     analysis: Option<&Result<Analysis, String>>,
-    progress: Option<f32>,
+    view: PlayerView,
     today: i32,
 ) -> Option<Action> {
     let id = ui.make_persistent_id(("clip", &clip.path));
     let card = ui.interact(rect, id, Sense::hover());
-    let painter = ui.painter();
     let fill = if card.hovered() { mix(BG_SECONDARY, BG_HOVER, 0.6) } else { BG_SECONDARY };
-    painter.rect_filled(rect, CornerRadius::same(8), fill);
+    ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
     let inner = rect.shrink(12.0);
     let mut action = None;
+    let seconds = match analysis {
+        Some(Ok(a)) => a.seconds,
+        _ => clip.size as f32 / BYTES_PER_SEC,
+    };
 
-    // Waveform panel with the play button; clicking anywhere on it plays.
+    // Player: play/pause button and the waveform to scrub on.
     let panel = Rect::from_min_size(inner.min, vec2(inner.width(), 64.0));
-    let panel_resp = ui.interact(panel, id.with("play"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-    if panel_resp.clicked() {
-        action = Some(Action::Play);
-    }
-    painter.rect_filled(panel, CornerRadius::same(6), BG_TERTIARY);
-    let center = pos2(panel.left() + 30.0, panel.center().y);
-    let btn = if panel_resp.hovered() { BLURPLE_HOVER } else { BLURPLE };
-    painter.circle_filled(center, 18.0, btn);
-    if progress.is_some() {
-        // Stop: a square.
-        painter.rect_filled(Rect::from_center_size(center, vec2(11.0, 11.0)), CornerRadius::same(2), Color32::WHITE);
-    } else {
-        // Play: a triangle, nudged right so it looks centred.
-        let c = center + vec2(2.0, 0.0);
-        painter.add(egui::Shape::convex_polygon(
-            vec![c + vec2(-5.0, -7.0), c + vec2(7.0, 0.0), c + vec2(-5.0, 7.0)],
-            Color32::WHITE,
-            egui::Stroke::NONE,
-        ));
-    }
+    ui.painter().rect_filled(panel, CornerRadius::same(6), BG_TERTIARY);
 
-    let bars_area = Rect::from_min_max(pos2(panel.left() + 60.0, panel.top() + 10.0), pos2(panel.right() - 12.0, panel.bottom() - 10.0));
+    let center = pos2(panel.left() + 30.0, panel.center().y);
+    let play = ui
+        .interact(Rect::from_center_size(center, vec2(36.0, 36.0)), id.with("play"), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(if view.playing { "Pause" } else { "Play" });
+    if play.clicked() {
+        action = Some(Action::Toggle);
+    }
+    play_button(ui, center, view.playing, play.hovered());
+
+    let bars_area = Rect::from_min_max(pos2(panel.left() + 60.0, panel.top() + 10.0), pos2(panel.right() - 14.0, panel.bottom() - 10.0));
+    // The whole panel height reacts, so the waveform is easy to grab.
+    let scrub_rect = Rect::from_x_y_ranges(bars_area.x_range(), panel.y_range());
+    let scrub = ui.interact(scrub_rect, id.with("scrub"), Sense::click_and_drag()).on_hover_cursor(CursorIcon::PointingHand);
+    let frac_at = |x: f32| ((x - bars_area.left()) / bars_area.width()).clamp(0.0, 1.0);
+    // While dragging, the playhead follows the mouse; playback jumps there on release.
+    let dragging = scrub.dragged() || scrub.is_pointer_button_down_on();
+    let drag_at = scrub.interact_pointer_pos().map(|p| frac_at(p.x)).filter(|_| dragging);
+    if scrub.drag_stopped() || scrub.clicked() {
+        if let Some(p) = scrub.interact_pointer_pos() {
+            action = Some(Action::Seek(frac_at(p.x)));
+        }
+    }
+    let hover_at = scrub.hover_pos().map(|p| frac_at(p.x)).filter(|_| drag_at.is_none());
+    let head = drag_at.or(view.active.then_some(view.position));
+
+    let painter = ui.painter();
     let peaks: Vec<f32> = match analysis {
         Some(Ok(a)) => a.peaks.clone(),
         _ => vec![0.06; library::WAVEFORM_BARS],
     };
     let step = bars_area.width() / peaks.len() as f32;
     let bar_w = (step * 0.6).max(1.5);
-    let played = progress.unwrap_or(0.0);
     for (i, p) in peaks.iter().enumerate() {
         let x = bars_area.left() + step * (i as f32 + 0.5);
         let h = (p * bars_area.height()).max(3.0);
         let bar = Rect::from_center_size(pos2(x, bars_area.center().y), vec2(bar_w, h));
-        let done = progress.is_some() && (i as f32 + 0.5) / peaks.len() as f32 <= played;
-        let color = if done { Color32::WHITE } else if analysis.is_some() { TEXT_MUTED } else { GRAY_BTN };
+        let done = head.is_some_and(|f| (i as f32 + 0.5) / peaks.len() as f32 <= f);
+        let color = if done {
+            Color32::WHITE
+        } else if analysis.is_some() {
+            TEXT_MUTED
+        } else {
+            GRAY_BTN
+        };
         painter.rect_filled(bar, CornerRadius::same(1), color);
     }
 
+    // Hover: a faint line and the time under the mouse.
+    if let Some(f) = hover_at {
+        let x = bars_area.left() + f * bars_area.width();
+        painter.line_segment([pos2(x, panel.top() + 6.0), pos2(x, panel.bottom() - 6.0)], Stroke::new(1.0, HEADER_SECONDARY.gamma_multiply(0.6)));
+        time_bubble(ui, x, panel, &clock_precise(f * seconds));
+    }
+    // Playhead: a line with a round handle.
+    if let Some(f) = head {
+        let x = bars_area.left() + f * bars_area.width();
+        painter.line_segment([pos2(x, panel.top() + 4.0), pos2(x, panel.bottom() - 4.0)], Stroke::new(2.0, Color32::WHITE));
+        painter.circle_filled(pos2(x, panel.top() + 6.0), 4.5, Color32::WHITE);
+        if drag_at.is_some() {
+            time_bubble(ui, x, panel, &clock_precise(f * seconds));
+        }
+    }
+
     // Title and details.
-    let seconds = match analysis {
-        Some(Ok(a)) => a.seconds,
-        _ => clip.size as f32 / BYTES_PER_SEC,
-    };
     let title = clip.saved.map(|s| when(s, today)).unwrap_or_else(|| {
         clip.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
     });
     let title_y = panel.bottom() + 12.0;
-    let title_rect = Rect::from_min_max(pos2(inner.left(), title_y), pos2(inner.right() - 48.0, title_y + 20.0));
+    let title_rect = Rect::from_min_max(pos2(inner.left(), title_y), pos2(inner.right() - 96.0, title_y + 20.0));
     // One line, ending in "…" when it doesn't fit (e.g. long custom names).
     let mut job = egui::text::LayoutJob::simple_singleline(title, font(15.0, Weight::Semibold), HEADER_PRIMARY);
     job.wrap = egui::text::TextWrapping {
@@ -337,7 +399,12 @@ fn tile(
         overflow_character: Some('…'),
     };
     painter.galley(title_rect.left_top(), painter.layout_job(job), HEADER_PRIMARY);
-    painter.text(pos2(inner.right(), title_y), Align2::RIGHT_TOP, clock(seconds), font(14.0, Weight::Semibold), HEADER_SECONDARY);
+    // "0:12 / 0:30" while this clip is in the player, else just the length.
+    let length = match head.filter(|_| view.active || drag_at.is_some()) {
+        Some(f) => format!("{} / {}", clock(f * seconds), clock(seconds)),
+        None => clock(seconds),
+    };
+    painter.text(pos2(inner.right(), title_y), Align2::RIGHT_TOP, length, font(14.0, Weight::Semibold), HEADER_SECONDARY);
     let detail = match analysis {
         Some(Err(_)) => format!("{} · can't read this file", megabytes(clip.size)),
         _ => megabytes(clip.size),
@@ -362,9 +429,47 @@ fn tile(
     action
 }
 
+/// The round blurple button: a triangle to play, two bars to pause.
+fn play_button(ui: &Ui, center: egui::Pos2, playing: bool, hovered: bool) {
+    let painter = ui.painter();
+    painter.circle_filled(center, 18.0, if hovered { BLURPLE_HOVER } else { BLURPLE });
+    if playing {
+        for dx in [-4.0, 4.0] {
+            let bar = Rect::from_center_size(center + vec2(dx, 0.0), vec2(4.0, 13.0));
+            painter.rect_filled(bar, CornerRadius::same(1), Color32::WHITE);
+        }
+    } else {
+        // Nudged right so it looks centred.
+        let c = center + vec2(2.0, 0.0);
+        painter.add(egui::Shape::convex_polygon(
+            vec![c + vec2(-5.0, -7.0), c + vec2(7.0, 0.0), c + vec2(-5.0, 7.0)],
+            Color32::WHITE,
+            Stroke::NONE,
+        ));
+    }
+}
+
+/// A small time label just above the waveform at `x`. Drawn on the tooltip
+/// layer so the scroll area never clips it.
+fn time_bubble(ui: &Ui, x: f32, panel: Rect, label: &str) {
+    let painter: Painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("scrub-time")));
+    let galley = painter.layout_no_wrap(label.to_string(), font(12.0, Weight::Bold), Color32::WHITE);
+    let size = galley.size() + vec2(10.0, 4.0);
+    let left = (x - size.x / 2.0).clamp(panel.left() + 2.0, panel.right() - size.x - 2.0);
+    let rect = Rect::from_min_size(pos2(left, panel.top() - size.y - 4.0), size);
+    painter.rect_filled(rect, CornerRadius::same(4), BG_FLOATING);
+    painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+}
+
 // ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
+
+/// 0:12.4, for scrubbing.
+fn clock_precise(seconds: f32) -> String {
+    let tenths = (seconds.max(0.0) * 10.0).round() as u32;
+    format!("{}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
+}
 
 fn megabytes(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)

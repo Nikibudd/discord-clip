@@ -1,12 +1,12 @@
 //! The clips folder as a library: listing clips, reading their length and a
-//! waveform for display, playing them, and moving them to the Recycle Bin.
+//! waveform for display, and moving them to the Recycle Bin. (Playback is
+//! in `player.rs`.)
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_FLAGS, SND_NODEFAULT};
+use windows::core::PCWSTR;
 
 /// Number of bars in a clip's waveform.
 pub const WAVEFORM_BARS: usize = 48;
@@ -121,22 +121,6 @@ fn normalize(mut peaks: Vec<f32>) -> Vec<f32> {
         *p = p.max(0.06);
     }
     peaks
-}
-
-/// Plays a WAV file (asynchronously; replaces whatever is playing).
-pub fn play(path: &Path) -> Result<()> {
-    let ok = unsafe { PlaySoundW(&HSTRING::from(path.as_os_str()), None, SND_FILENAME | SND_ASYNC | SND_NODEFAULT) };
-    if ok.as_bool() {
-        Ok(())
-    } else {
-        anyhow::bail!("couldn't play {}", path.display())
-    }
-}
-
-pub fn stop() {
-    unsafe {
-        let _ = PlaySoundW(PCWSTR::null(), None, SND_FLAGS(0));
-    }
 }
 
 /// Moves a file to the Recycle Bin, so deleting a clip can be undone.

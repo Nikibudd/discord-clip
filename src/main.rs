@@ -19,6 +19,7 @@ mod hotkey;
 mod icon;
 mod library;
 mod log;
+mod player;
 mod ringbuffer;
 mod tray;
 mod ui;

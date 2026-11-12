@@ -24,8 +24,9 @@ Left-click the tray icon to open the Discord Clip window: a Discord-styled
 window with a sidebar of pages. Closing it just hides it again.
 
 - **Clips** (the page it opens on): every clip in the clips folder as a card
-  with its waveform, date, length and size, newest first. Click the waveform
-  to play it; **Copy** puts it on the clipboard for Ctrl+V in Discord,
+  with its waveform, date, length and size, newest first. The play button
+  plays/pauses; click or drag on the waveform to scrub (playhead, time under
+  the mouse). **Copy** puts it on the clipboard for Ctrl+V in Discord,
   **Show** opens it in Explorer, **Delete** moves it to the Recycle Bin. New
   clips appear on their own.
 - **Settings**: hotkey recorder (combos already taken by another app are
@@ -172,5 +173,6 @@ it from the tray before copying a new build over it).
 | `src/capture.rs` | Finds the root Discord process; process-loopback / mic WASAPI streams in a fixed 48 kHz stereo format, event-driven; pads silence when the stream goes quiet so the buffer stays in step with real time |
 | `src/ringbuffer.rs` | Fixed-size circular sample buffer |
 | `src/clip.rs` | Mixes tracks (aligned at the hotkey press), writes 16-bit WAV, copies the file to the clipboard |
-| `src/library.rs` | The clips folder as a library: listing clips, reading length + waveform, playback (PlaySound), Recycle Bin |
+| `src/library.rs` | The clips folder as a library: listing clips, reading length + waveform, Recycle Bin |
+| `src/player.rs` | Clip playback with pause and seeking (`waveOut`) |
 | `src/log.rs` | Log file |
