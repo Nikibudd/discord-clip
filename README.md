@@ -31,7 +31,7 @@ window with a sidebar of pages. Closing it just hides it again.
   clips appear on their own.
 - **Settings**: hotkey recorder (combos already taken by another app are
   rejected), clip length, microphone on/off and volume, clips folder,
-  clipboard and notification toggles, and buttons to open/reload
+  clipboard and notification toggles, **Start with Windows**, and buttons to open/reload
   `config.ini` and the log. Changes save immediately. Clip length and the
   microphone switch apply after a restart; a bar offers to do that for you.
 - **Updates**: current version, "Check for updates", and **Update now** when
@@ -167,6 +167,7 @@ it from the tray before copying a new build over it).
 | `src/tray/` | The tray app (main thread): `mod.rs` app state + message loop, `notify_icon.rs` tray icon/tooltip/notifications, `menu.rs` right-click menu, `global_hotkey.rs` save-clip hotkey, `actions.rs` saving clips + opening folders, `window.rs` snapshot/commands for the window, folder picker, update hand-off |
 | `src/ui/` | The window (egui, own thread): `mod.rs` command/snapshot API + window lifecycle, `theme.rs` Discord colors/fonts, `widgets.rs` buttons/toggles/sliders, `sidebar.rs`, `keybind.rs` hotkey recorder, one file per page (`clips.rs`, `settings.rs`, `updates.rs`) |
 | `src/icon.rs` | The app icon, drawn at runtime (tray + window) |
+| `src/autostart.rs` | "Start with Windows": the `Discord Clip` value under `HKCU...Run` (same as the installer), incl. Task Manager's Startup apps switch |
 | `src/update.rs` | Update checks and in-app updates: fetches `latest.json` over WinHTTP, downloads + SHA-256-verifies the installer or portable exe, hands over to it |
 | `src/config.rs` | `config.ini` load/save/validation |
 | `src/hotkey.rs` | Parsing/formatting `Ctrl+Alt+C`-style hotkeys |
