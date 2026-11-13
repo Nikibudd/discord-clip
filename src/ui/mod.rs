@@ -14,6 +14,7 @@
 mod clips;
 mod confirm;
 mod edit;
+mod follow;
 mod keybind;
 mod settings;
 mod sidebar;
@@ -68,6 +69,8 @@ pub enum Command {
     SetSeparateTracks(bool),
     /// Format new clips are saved in (#8). Applies to the next clip.
     SetFormat(crate::audio::Format),
+    /// Window colours (#37).
+    SetTheme(crate::config::ThemeMode),
     CheckUpdates,
     /// Download and install the update found by the last check.
     InstallUpdate,
@@ -246,6 +249,7 @@ struct ClipWindow {
     clips: clips::ClipsPage,
     settings: settings::SettingsPage,
     icons: Icons,
+    theme: follow::Follower,
 }
 
 impl ClipWindow {
@@ -255,12 +259,10 @@ impl ClipWindow {
             if let RawWindowHandle::Win32(h) = handle.as_raw() {
                 let hwnd = h.hwnd.get();
                 shared().hwnd.store(hwnd, Ordering::SeqCst);
-                style_title_bar(HWND(hwnd as *mut c_void));
             }
         }
         *shared().ctx.lock().unwrap() = Some(cc.egui_ctx.clone());
         setup_fonts(&cc.egui_ctx);
-        setup_style(&cc.egui_ctx);
 
         let texture = |name: &str, rgb| {
             let img = egui::ColorImage::from_rgba_unmultiplied([64, 64], &crate::icon::rgba(64, rgb));
@@ -271,6 +273,7 @@ impl ClipWindow {
             clips: clips::ClipsPage::default(),
             settings: settings::SettingsPage::default(),
             icons: Icons { active: texture("icon-active", BLURPLE_RGB), idle: texture("icon-idle", IDLE_RGB) },
+            theme: follow::Follower::start(),
         }
     }
 
@@ -301,6 +304,7 @@ fn set(cmd: Command) {
             Command::SetCheckUpdates(c) => snap.cfg.check_updates = *c,
             Command::SetSeparateTracks(s) => snap.cfg.separate_tracks = *s,
             Command::SetFormat(f) => snap.cfg.format = *f,
+            Command::SetTheme(t) => snap.cfg.theme = *t,
             Command::SetAutostart(on) => {
                 snap.autostart = if *on { crate::autostart::State::On } else { crate::autostart::State::Off }
             }
@@ -312,7 +316,7 @@ fn set(cmd: Command) {
 
 impl eframe::App for ClipWindow {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        BG_PRIMARY.to_normalized_gamma_f32()
+        pal().bg_primary.to_normalized_gamma_f32()
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -327,15 +331,16 @@ impl eframe::App for ClipWindow {
             self.page = page;
         }
         let snap = shared().snapshot.lock().unwrap().clone();
+        self.theme.update(&ctx, snap.cfg.theme);
 
         egui::Panel::left("sidebar")
             .exact_size(220.0)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(BG_SECONDARY))
+            .frame(Frame::new().fill(pal().bg_secondary))
             .show(ui, |ui| sidebar::show(ui, &mut self.page, &snap, &self.icons));
 
-        egui::CentralPanel::default().frame(Frame::new().fill(BG_PRIMARY)).show(ui, |ui| {
+        egui::CentralPanel::default().frame(Frame::new().fill(pal().bg_primary)).show(ui, |ui| {
             if snap.restart_needed {
                 settings::restart_bar(ui);
             }
@@ -345,7 +350,7 @@ impl eframe::App for ClipWindow {
                     ui.set_max_width(ui.available_width().min(700.0));
                     match self.page {
                         Page::Clips => self.clips.show(ui, &snap),
-                        Page::Settings => self.settings.show(ui, &snap),
+                        Page::Settings => self.settings.show(ui, &snap, &self.theme),
                         Page::Updates => updates::show(ui, &snap, &self.icons.active),
                     }
                 });
