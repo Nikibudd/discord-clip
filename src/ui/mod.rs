@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use eframe::egui::{self, Frame, Margin, TextureHandle, Ui, ViewportCommand};
+use eframe::egui::{self, Color32, Frame, Margin, TextureHandle, Ui, ViewportCommand};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, IsIconic, SetForegroundWindow, ShowWindow, ASFW_ANY, SW_HIDE,
@@ -314,6 +314,8 @@ fn set(cmd: Command) {
     send(cmd);
 }
 
+const SIDEBAR_WIDTH: f32 = 220.0;
+
 impl eframe::App for ClipWindow {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         pal().bg_primary.to_normalized_gamma_f32()
@@ -333,14 +335,25 @@ impl eframe::App for ClipWindow {
         let snap = shared().snapshot.lock().unwrap().clone();
         self.theme.update(&ctx, snap.cfg.theme);
 
+        // A Nitro theme's gradient goes behind see-through panels (#39).
+        let backdrop = backdrop();
+        if let Some(b) = &backdrop {
+            let window = ctx.content_rect();
+            let split = window.left() + SIDEBAR_WIDTH;
+            let (side, rest) = (window.with_max_x(split), window.with_min_x(split));
+            b.paint(ui.painter(), window, side, b.sidebar);
+            b.paint(ui.painter(), window, rest, b.content);
+        }
+        let fill = |solid: Color32| if backdrop.is_some() { Color32::TRANSPARENT } else { solid };
+
         egui::Panel::left("sidebar")
-            .exact_size(220.0)
+            .exact_size(SIDEBAR_WIDTH)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(pal().bg_secondary))
+            .frame(Frame::new().fill(fill(pal().bg_secondary)))
             .show(ui, |ui| sidebar::show(ui, &mut self.page, &snap, &self.icons));
 
-        egui::CentralPanel::default().frame(Frame::new().fill(pal().bg_primary)).show(ui, |ui| {
+        egui::CentralPanel::default().frame(Frame::new().fill(fill(pal().bg_primary))).show(ui, |ui| {
             if snap.restart_needed {
                 settings::restart_bar(ui);
             }
