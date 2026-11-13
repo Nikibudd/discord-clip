@@ -72,11 +72,6 @@ pub fn rename(from: &Path, to: &Path) -> Result<()> {
     rename_in(&store_path(), from, to)
 }
 
-/// A copy of the clip was made (e.g. a trimmed copy): it gets the same volumes.
-pub fn copy(from: &Path, to: &Path) -> Result<()> {
-    copy_in(&store_path(), from, to)
-}
-
 fn load_from(store: &Path) -> Table {
     let Ok(text) = std::fs::read_to_string(store) else { return Table::new() };
     text.lines()
@@ -125,17 +120,6 @@ fn rename_in(store: &Path, from: &Path, to: &Path) -> Result<()> {
     })
 }
 
-fn copy_in(store: &Path, from: &Path, to: &Path) -> Result<()> {
-    if !load_from(store).contains_key(&key(from)) {
-        return Ok(());
-    }
-    modify(store, |t| {
-        if let Some(v) = t.get(&key(from)).copied() {
-            t.insert(key(to), v);
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,7 +154,7 @@ mod tests {
 
         let copy = dir.join("copy.wav");
         std::fs::write(&copy, b"x").unwrap();
-        copy_in(&store, &b, &copy).unwrap();
+        set_in(&store, &copy, v).unwrap();
         assert_eq!(lookup(&load_from(&store), &copy), v);
 
         // Back to default removes the entry; deleted clips are dropped on the next write.

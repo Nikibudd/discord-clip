@@ -218,7 +218,8 @@ fn normalize(mut peaks: Vec<f32>) -> Vec<f32> {
 const TRIM_FADE_SECS: f32 = 0.01;
 
 /// The frames `first..last` that `start..end` (0..=1) selects, and a gain per
-/// frame that fades in and out at the cuts.
+/// frame that fades in and out at the cuts. The clip's own start and end
+/// aren't cuts, so they don't fade (e.g. Save as new with only new volumes).
 fn trim_range(frames: usize, rate: u32, start: f32, end: f32) -> Result<(usize, usize, impl Fn(usize) -> f32)> {
     let (start, end) = (start.clamp(0.0, 1.0), end.clamp(0.0, 1.0));
     let first = (start * frames as f32) as usize;
@@ -227,9 +228,10 @@ fn trim_range(frames: usize, rate: u32, start: f32, end: f32) -> Result<(usize, 
         bail!("nothing selected");
     }
     let fade = ((TRIM_FADE_SECS * rate as f32) as usize).min((last - first) / 2).max(1);
+    let (cut_start, cut_end) = (first > 0, last < frames);
     let gain = move |frame: usize| -> f32 {
-        let from_start = frame - first;
-        let to_end = last - 1 - frame;
+        let from_start = if cut_start { frame - first } else { usize::MAX };
+        let to_end = if cut_end { last - 1 - frame } else { usize::MAX };
         (from_start.min(to_end) as f32 / fade as f32).min(1.0)
     };
     Ok((first, last, gain))
@@ -284,15 +286,15 @@ pub fn write_trimmed(src: &Path, start: f32, end: f32, dest: &Path) -> Result<()
 }
 
 /// Saves the trimmed part as a new clip next to the original, keeping its
-/// timestamp so it sorts next to it: `discord_clip_<stamp> Bob (trimmed).wav`.
-pub fn save_trimmed_copy(src: &Path, start: f32, end: f32) -> Result<PathBuf> {
+/// timestamp so it sorts next to it: `discord_clip_<stamp> Bob (edited).wav`.
+pub fn save_edited_copy(src: &Path, start: f32, end: f32) -> Result<PathBuf> {
     let dir = src.parent().context("clip has no folder")?;
     let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let ext = src.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "wav".into());
-    let mut dest = dir.join(format!("{stem} (trimmed).{ext}"));
+    let mut dest = dir.join(format!("{stem} (edited).{ext}"));
     let mut n = 2;
     while dest.exists() {
-        dest = dir.join(format!("{stem} (trimmed {n}).{ext}"));
+        dest = dir.join(format!("{stem} (edited {n}).{ext}"));
         n += 1;
     }
     write_trimmed(src, start, end, &dest)?;
@@ -313,21 +315,40 @@ pub fn replace_with_trimmed(src: &Path, start: f32, end: f32) -> Result<()> {
     std::fs::rename(&tmp, src).with_context(|| format!("saving {}", src.display()))
 }
 
-/// Writes the trimmed part to a temporary file with the clip's file name (so
-/// that's the name Discord shows), for copying to the clipboard. A clip with
-/// separate tracks is mixed at its `volumes`.
-pub fn trimmed_temp_copy(src: &Path, start: f32, end: f32, volumes: Volumes) -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join("discord-clip-trimmed");
-    std::fs::create_dir_all(&dir)?;
-    // Discord gets a normal stereo mix in the clip's format, named like the
-    // clip. Trimmed and mixed in memory, so it's encoded only once.
-    let dest = dir.join(src.file_name().context("clip has no file name")?);
-    let audio = crate::audio::read(src)?;
-    let format = Format::for_copy_of(src, &audio)?;
-    let part = trimmed(&audio, start, end)?;
-    let stereo = Audio { samples: to_stereo(&part, Tracks::Both, volumes), channels: 2, rate: part.rate };
-    crate::audio::write(&dest, &stereo, format)?;
-    Ok(dest)
+/// A clip's waveform per track, for the Edit dialog (#31).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackPeaks {
+    pub seconds: f32,
+    /// Peak level per bar, 0..=1: one set for a normal clip, two (Discord,
+    /// mic) for a clip with separate tracks. All sets share one scale, so a
+    /// quiet track looks quieter than a loud one.
+    pub tracks: Vec<Vec<f32>>,
+}
+
+/// Reads a clip's waveform with `bars` bars per track.
+pub fn analyze_tracks(path: &Path, bars: usize) -> Result<TrackPeaks> {
+    let bars = bars.max(1);
+    let audio = crate::audio::read(path)?;
+    let ch = audio.channels.max(1) as usize;
+    // Which channels make up each track.
+    let groups: Vec<std::ops::Range<usize>> =
+        if audio.channels == crate::clip::TRACK_CHANNELS { vec![0..2, 2..4] } else { vec![0..ch] };
+    let frames = audio.frames();
+    let mut tracks = vec![vec![0f32; bars]; groups.len()];
+    for (f, frame) in audio.samples.chunks_exact(ch).enumerate() {
+        let bar = (f * bars / frames.max(1)).min(bars - 1);
+        for (t, range) in groups.iter().enumerate() {
+            let p = &mut tracks[t][bar];
+            for &s in &frame[range.clone()] {
+                *p = p.max(s.abs());
+            }
+        }
+    }
+    let max = tracks.iter().flatten().fold(0f32, |m, &p| m.max(p));
+    for p in tracks.iter_mut().flatten() {
+        *p = if max > 1e-4 { (*p / max).clamp(0.0, 1.0) } else { 0.0 };
+    }
+    Ok(TrackPeaks { seconds: audio.seconds(), tracks })
 }
 
 /// Which part of a clip with separate tracks to use.
@@ -410,12 +431,17 @@ pub enum DiscordReady {
     TooLong(f32),
 }
 
+/// Too long for the soundboard (a part has to be picked first)?
+pub fn too_long_for_soundboard(seconds: f32) -> bool {
+    seconds > SOUNDBOARD_MAX_SECONDS + SOUNDBOARD_SLACK_SECONDS
+}
+
 /// Is this clip already soundboard-ready as it is: a stereo (or mono) MP3
 /// within the limits, without a custom mix?
 pub fn is_discord_ready(clip: &ClipFile, seconds: f32, channels: u16, custom_mix: bool) -> bool {
     Format::of_path(&clip.path).is_some_and(|f| f.extension() == "mp3")
         && channels <= 2
-        && seconds <= SOUNDBOARD_MAX_SECONDS + SOUNDBOARD_SLACK_SECONDS
+        && !too_long_for_soundboard(seconds)
         && clip.size <= SOUNDBOARD_MAX_BYTES
         && !custom_mix
 }
@@ -441,7 +467,7 @@ fn make_discord_ready_with(
     let part = if start <= 0.0 && end >= 1.0 { audio } else { trimmed(&audio, start, end)? };
     let mut stereo = Audio { samples: stereo_unclamped(&part, Tracks::Both, volumes), channels: 2, rate: part.rate };
     let seconds = stereo.seconds();
-    if seconds > SOUNDBOARD_MAX_SECONDS + SOUNDBOARD_SLACK_SECONDS {
+    if too_long_for_soundboard(seconds) {
         return Ok(DiscordReady::TooLong(seconds));
     }
     let max_frames = ((SOUNDBOARD_MAX_SECONDS - MP3_PADDING_SECONDS) * stereo.rate as f32) as usize;
@@ -629,8 +655,8 @@ mod tests {
         // 2 s of a constant level, stereo.
         crate::clip::write_wav(&src, &vec![0.5f32; 48_000 * 2 * 2]).unwrap();
 
-        let copy = save_trimmed_copy(&src, 0.25, 0.75).unwrap();
-        assert_eq!(copy.file_name().unwrap(), "discord_clip_20261109_213151 Bob (trimmed).wav");
+        let copy = save_edited_copy(&src, 0.25, 0.75).unwrap();
+        assert_eq!(copy.file_name().unwrap(), "discord_clip_20261109_213151 Bob (edited).wav");
         let r = hound::WavReader::open(&copy).unwrap();
         assert_eq!(r.spec(), hound::WavReader::open(&src).unwrap().spec());
         assert_eq!(r.duration(), 48_000); // 1 s
@@ -641,14 +667,15 @@ mod tests {
         // The trimmed copy still has the date and a name.
         let (saved, name) = split_clip_name(&copy.file_stem().unwrap().to_string_lossy());
         assert!(saved.is_some());
-        assert_eq!(name.as_deref(), Some("Bob (trimmed)"));
+        assert_eq!(name.as_deref(), Some("Bob (edited)"));
         // Saving again doesn't overwrite.
-        let second = save_trimmed_copy(&src, 0.0, 0.5).unwrap();
-        assert_eq!(second.file_name().unwrap(), "discord_clip_20261109_213151 Bob (trimmed 2).wav");
+        let second = save_edited_copy(&src, 0.0, 0.5).unwrap();
+        assert_eq!(second.file_name().unwrap(), "discord_clip_20261109_213151 Bob (edited 2).wav");
+        // The clip's own ends aren't cuts: a full-length copy doesn't fade.
+        let full = save_edited_copy(&src, 0.0, 1.0).unwrap();
+        let samples: Vec<i16> = hound::WavReader::open(&full).unwrap().samples::<i16>().map(|s| s.unwrap()).collect();
+        assert!(samples[0] > 16_000 && samples[samples.len() - 1] > 16_000);
 
-        let tmp = trimmed_temp_copy(&src, 0.0, 0.1, Volumes::default()).unwrap();
-        assert_eq!(tmp.file_name(), src.file_name());
-        assert_eq!(hound::WavReader::open(&tmp).unwrap().duration(), 9_600);
         assert!(write_trimmed(&src, 0.6, 0.6, &dir.join("empty.wav")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -698,10 +725,18 @@ mod tests {
         crate::clip::write_wav(&stereo, &[0.1, 0.1]).unwrap();
         assert_eq!(shareable_copy(&stereo, Tracks::Both, Volumes::default()).unwrap(), stereo);
 
-        // Trimming keeps both tracks; the trimmed copy for Discord is a stereo mix.
-        let trimmed = save_trimmed_copy(&src, 0.0, 0.5).unwrap();
+        // Trimming keeps both tracks.
+        let trimmed = save_edited_copy(&src, 0.0, 0.5).unwrap();
         assert_eq!(channels(&trimmed).unwrap(), 4);
-        assert_eq!(channels(&trimmed_temp_copy(&src, 0.0, 0.5, Volumes::default()).unwrap()).unwrap(), 2);
+
+        // The Edit dialog's waveforms (#31): one per track, on one scale
+        // (Discord peaks at 0.5, the mic at 0.25).
+        let peaks = analyze_tracks(&src, 10).unwrap();
+        assert_eq!(peaks.tracks.len(), 2);
+        assert!(peaks.tracks.iter().all(|t| t.len() == 10));
+        assert!(near(peaks.tracks[0][0], 1.0) && near(peaks.tracks[1][0], 0.5), "{:?}", peaks.tracks);
+        assert!((peaks.seconds - 0.01).abs() < 0.001);
+        assert_eq!(analyze_tracks(&stereo, 10).unwrap().tracks.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -789,7 +824,7 @@ mod tests {
             assert_eq!(a.channels, 4, "{format:?}");
             assert!((a.seconds - 1.0).abs() < 0.01, "{format:?} {}", a.seconds);
 
-            let copy = save_trimmed_copy(&src, 0.25, 0.75).unwrap();
+            let copy = save_edited_copy(&src, 0.25, 0.75).unwrap();
             assert_eq!(copy.extension().unwrap(), ext);
             let t = crate::audio::read(&copy).unwrap();
             assert_eq!((t.channels, t.frames()), (4, 24_000), "{format:?}");
@@ -801,8 +836,6 @@ mod tests {
             let muted = shareable_copy(&src, Tracks::Both, Volumes { discord: 0.0, mic: 1.0 }).unwrap();
             let quiet = crate::audio::read(&muted).unwrap();
             assert!(quiet.samples.iter().all(|s| s.abs() < 0.01), "{format:?}");
-            let tmp = trimmed_temp_copy(&src, 0.0, 0.5, Volumes::default()).unwrap();
-            assert_eq!((tmp.extension().unwrap().to_str().unwrap(), channels(&tmp).unwrap()), (ext, 2));
         }
         // Both formats show up on the Clips page, temporary files don't.
         std::fs::write(dir.join(".discord_clip_x.ogg.part"), b"x").unwrap();
