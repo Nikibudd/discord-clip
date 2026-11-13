@@ -431,12 +431,17 @@ pub enum DiscordReady {
     TooLong(f32),
 }
 
+/// Too long for the soundboard (a part has to be picked first)?
+pub fn too_long_for_soundboard(seconds: f32) -> bool {
+    seconds > SOUNDBOARD_MAX_SECONDS + SOUNDBOARD_SLACK_SECONDS
+}
+
 /// Is this clip already soundboard-ready as it is: a stereo (or mono) MP3
 /// within the limits, without a custom mix?
 pub fn is_discord_ready(clip: &ClipFile, seconds: f32, channels: u16, custom_mix: bool) -> bool {
     Format::of_path(&clip.path).is_some_and(|f| f.extension() == "mp3")
         && channels <= 2
-        && seconds <= SOUNDBOARD_MAX_SECONDS + SOUNDBOARD_SLACK_SECONDS
+        && !too_long_for_soundboard(seconds)
         && clip.size <= SOUNDBOARD_MAX_BYTES
         && !custom_mix
 }
@@ -462,7 +467,7 @@ fn make_discord_ready_with(
     let part = if start <= 0.0 && end >= 1.0 { audio } else { trimmed(&audio, start, end)? };
     let mut stereo = Audio { samples: stereo_unclamped(&part, Tracks::Both, volumes), channels: 2, rate: part.rate };
     let seconds = stereo.seconds();
-    if seconds > SOUNDBOARD_MAX_SECONDS + SOUNDBOARD_SLACK_SECONDS {
+    if too_long_for_soundboard(seconds) {
         return Ok(DiscordReady::TooLong(seconds));
     }
     let max_frames = ((SOUNDBOARD_MAX_SECONDS - MP3_PADDING_SECONDS) * stereo.rate as f32) as usize;

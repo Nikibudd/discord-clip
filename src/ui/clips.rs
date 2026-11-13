@@ -56,6 +56,8 @@ pub struct ClipsPage {
     menu: Option<PathBuf>,
     /// Stored track volumes of all clips (#7), reloaded with each scan.
     volumes: volumes::Table,
+    /// A confirm dialog (#30), and the clip to make Discord-ready once confirmed.
+    confirm: Option<(super::confirm::ConfirmDialog, ClipFile)>,
 }
 
 enum Action {
@@ -79,8 +81,10 @@ enum Action {
     CloseMenu,
     /// Open the Edit dialog (trim and track volumes).
     Edit,
-    /// Turn the clip into a soundboard MP3 in its place (#25).
-    DiscordReady,
+    /// Turn the clip into a soundboard MP3 in its place (#25), after a
+    /// confirm (#30). What the card knows about the clip so far: whether it's
+    /// too long for the soundboard, and whether it has separate tracks.
+    DiscordReady { too_long: bool, tracks: bool },
 }
 
 /// How a card's player looks this frame.
@@ -104,6 +108,7 @@ impl ClipsPage {
     pub fn on_hide(&mut self) {
         self.stop();
         self.edit = None;
+        self.confirm = None;
         self.renaming = None;
         self.menu = None;
     }
@@ -161,6 +166,7 @@ impl ClipsPage {
         }
 
         self.show_edit(ui.ctx());
+        self.show_confirm(ui.ctx());
         self.show_toast(ui);
     }
 
@@ -300,23 +306,24 @@ impl ClipsPage {
                 let v = self.volumes_of(&clip.path);
                 super::edit::EditDialog::open(clip, v).map(|d| self.edit = Some(d))
             }
-            Action::DiscordReady => match self.make_discord_ready(&clip.path) {
-                Ok(Some(msg)) => {
-                    self.toast = Some((msg, Instant::now()));
-                    Ok(())
-                }
-                // Too long: pick the part to keep in the Edit dialog first.
-                Ok(None) => {
-                    self.stop();
-                    let v = self.volumes_of(&clip.path);
-                    super::edit::EditDialog::open_for_soundboard(clip, v).map(|d| self.edit = Some(d))
-                }
-                Err(e) => {
-                    crate::log!("making {} Discord-ready failed: {e:#}", clip.path.display());
-                    self.toast = Some((format!("Couldn't make it Discord-ready: {e:#}"), Instant::now()));
-                    Ok(())
-                }
-            },
+            // Too long: pick the part to keep in the Edit dialog first (it
+            // only changes the clip on Save, so there's nothing to confirm).
+            Action::DiscordReady { too_long: true, .. } => self.open_for_soundboard(clip),
+            Action::DiscordReady { too_long: false, tracks } => {
+                let what = if tracks {
+                    "Mixes Discord and your mic into one track, saves it as an MP3 for the soundboard and replaces this clip."
+                } else {
+                    "Saves this clip as an MP3 for the soundboard and replaces it."
+                };
+                let dialog = super::confirm::ConfirmDialog::new(
+                    "Make Discord-ready?",
+                    format!("{what} The original goes to the Recycle Bin."),
+                    "Make Discord-ready",
+                    ButtonKind::Primary,
+                );
+                self.confirm = Some((dialog, clip.clone()));
+                Ok(())
+            }
             Action::CancelRename => {
                 self.renaming = None;
                 Ok(())
@@ -366,6 +373,37 @@ impl ClipsPage {
                 crate::log!("rename failed: {e:#}");
                 self.toast = Some((format!("Couldn't rename the clip: {e:#}"), Instant::now()));
             }
+        }
+    }
+
+    /// Opens the Edit dialog to pick the part for the soundboard.
+    fn open_for_soundboard(&mut self, clip: &ClipFile) -> anyhow::Result<()> {
+        self.stop(); // the dialog has its own playback
+        let v = self.volumes_of(&clip.path);
+        super::edit::EditDialog::open_for_soundboard(clip, v).map(|d| self.edit = Some(d))
+    }
+
+    /// Shows the confirm dialog if it's open, and makes the clip
+    /// Discord-ready once confirmed.
+    fn show_confirm(&mut self, ctx: &egui::Context) {
+        let Some((dialog, _)) = &self.confirm else { return };
+        let Some(confirmed) = dialog.show(ctx) else { return };
+        let Some((_, clip)) = self.confirm.take() else { return };
+        if !confirmed {
+            return;
+        }
+        let result = match self.make_discord_ready(&clip.path) {
+            Ok(Some(msg)) => {
+                self.toast = Some((msg, Instant::now()));
+                Ok(())
+            }
+            // Turned out too long (it wasn't analysed yet): pick a part first.
+            Ok(None) => self.open_for_soundboard(&clip),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
+            crate::log!("making {} Discord-ready failed: {e:#}", clip.path.display());
+            self.toast = Some((format!("Couldn't make it Discord-ready: {e:#}"), Instant::now()));
         }
     }
 
@@ -682,7 +720,10 @@ fn tile(
         .on_hover_text("Mixes the tracks into one MP3 of 5 s or less for the soundboard and replaces this clip; the original goes to the Recycle Bin")
         .clicked()
     {
-        action = Some(Action::DiscordReady);
+        action = Some(Action::DiscordReady {
+            too_long: matches!(analysis, Some(Ok(a)) if library::too_long_for_soundboard(a.seconds)),
+            tracks: matches!(analysis, Some(Ok(a)) if a.channels == crate::clip::TRACK_CHANNELS),
+        });
     }
     // Everything else is in the ⋯ menu, so the card never runs out of room.
     let more = row
