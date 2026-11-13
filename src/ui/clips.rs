@@ -1,6 +1,6 @@
 //! The Clips page: the clips folder as a grid of cards, each with a
 //! waveform player (play/pause, click or drag on the waveform to scrub) and
-//! Copy / Show / Delete buttons.
+//! a Make Discord-ready button and a ⋯ menu (Copy, Trim, Rename, ...).
 //!
 //! Listing the folder is cheap and redone every couple of seconds while the
 //! page is open, so new clips appear on their own. Reading a clip's waveform
@@ -729,8 +729,20 @@ fn tile(
     let buttons = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 30.0), inner.max);
     let mut row = ui.new_child(egui::UiBuilder::new().max_rect(buttons).layout(Layout::left_to_right(Align::Center)));
     row.spacing_mut().item_spacing.x = 8.0;
-    if button_sized(&mut row, "Copy", ButtonKind::Primary, 30.0).on_hover_text("Copy to paste into Discord").clicked() {
-        action = Some(Action::Copy(library::Tracks::Both));
+    // The main action is the soundboard (#25); Copy (for chats) is in the ⋯ menu.
+    let ready = matches!(analysis, Some(Ok(a)) if library::is_discord_ready(clip, a.seconds, a.channels, custom_mix));
+    if ready {
+        if button_sized(&mut row, "Show in Explorer", ButtonKind::Secondary, 30.0)
+            .on_hover_text("This clip is ready for Discord's soundboard: pick this file when you upload a sound")
+            .clicked()
+        {
+            action = Some(Action::Show);
+        }
+    } else if button_sized(&mut row, "Make Discord-ready", ButtonKind::Primary, 30.0)
+        .on_hover_text("Mixes the tracks into one MP3 of 5 s or less for the soundboard and replaces this clip; the original goes to the Recycle Bin")
+        .clicked()
+    {
+        action = Some(Action::DiscordReady);
     }
     // Everything else is in the ⋯ menu, so the card never runs out of room.
     let more = row
@@ -741,8 +753,7 @@ fn tile(
     }
     if menu_open {
         let has_tracks = matches!(analysis, Some(Ok(a)) if a.channels == crate::clip::TRACK_CHANNELS);
-        let ready = matches!(analysis, Some(Ok(a)) if library::is_discord_ready(clip, a.seconds, a.channels, custom_mix));
-        if let Some(a) = card_menu(ui, id, &more, has_tracks, ready) {
+        if let Some(a) = card_menu(ui, id, &more, has_tracks) {
             action = Some(a);
         }
     }
@@ -838,28 +849,24 @@ fn more_button(ui: &mut Ui, open: bool) -> egui::Response {
 
 /// The ⋯ menu, opening below its button like Discord's context menus.
 /// Returns the picked item, or `CloseMenu` on a click outside it.
-fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool, ready: bool) -> Option<Action> {
+fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool) -> Option<Action> {
     use library::Tracks;
     let mut picked = None;
-    // Groups, separated by a line. Clips with separate tracks can copy one.
-    // An item without an action is shown greyed out.
-    let mut groups: Vec<Vec<(&str, Option<fn() -> Action>)>> = Vec::new();
+    // Groups, separated by a line: copying (for chats; clips with separate
+    // tracks can copy one), editing, deleting.
+    let mut copy: Vec<(&str, fn() -> Action)> = vec![("Copy", || Action::Copy(Tracks::Both))];
+    let mut edit: Vec<(&str, fn() -> Action)> = Vec::new();
     if has_tracks {
-        groups.push(vec![
-            ("Volume…", Some(|| Action::OpenVolume)),
-            ("Copy Discord only", Some(|| Action::Copy(Tracks::Discord))),
-            ("Copy mic only", Some(|| Action::Copy(Tracks::Mic))),
-        ]);
+        copy.push(("Copy Discord only", || Action::Copy(Tracks::Discord)));
+        copy.push(("Copy mic only", || Action::Copy(Tracks::Mic)));
+        edit.push(("Volume…", || Action::OpenVolume));
     }
-    let soundboard: (&str, Option<fn() -> Action>) =
-        if ready { ("Already Discord-ready", None) } else { ("Make Discord-ready", Some(|| Action::DiscordReady)) };
-    groups.push(vec![
-        ("Trim…", Some(|| Action::Trim)),
-        soundboard,
-        ("Rename", Some(|| Action::StartRename)),
-        ("Show in Explorer", Some(|| Action::Show)),
+    edit.extend([
+        ("Trim…", (|| Action::Trim) as fn() -> Action),
+        ("Rename", || Action::StartRename),
+        ("Show in Explorer", || Action::Show),
     ]);
-    groups.push(vec![("Delete", Some(|| Action::Delete))]);
+    let groups = [copy, edit, vec![("Delete", || Action::Delete)]];
     let area = egui::Area::new(id.with("menu"))
         .order(egui::Order::Foreground)
         .pivot(Align2::RIGHT_TOP)
@@ -882,11 +889,6 @@ fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool, r
                         }
                         for (label, make) in group {
                             let danger = *label == "Delete";
-                            let Some(make) = make else {
-                                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
-                                ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, *label, font(14.0, Weight::Semibold), TEXT_MUTED);
-                                continue;
-                            };
                             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
                             // Hover like Discord: blurple, or red for Delete.
                             if resp.hovered() {
