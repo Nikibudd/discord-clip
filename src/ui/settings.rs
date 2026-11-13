@@ -63,24 +63,27 @@ impl SettingsPage {
         ui.add_space(6.0);
         // What's shared with Discord is always stereo; with separate tracks
         // the file in the folder is twice that.
-        let shared = secs.round() as u64 * (crate::capture::SAMPLE_RATE as u64) * (crate::capture::CHANNELS as u64) * 2;
-        let mb = shared as f32 / 1_000_000.0;
-        let on_disk = if cfg.separate_tracks && cfg.mic {
-            format!(" ({:.1} MB in the folder with separate tracks)", mb * 2.0)
+        let shared = (secs.round() * cfg.format.stereo_bytes_per_sec()) as u64;
+        let on_disk = if cfg.separate_tracks && cfg.mic && cfg.format.dual_track() {
+            format!(" ({} in the folder with separate tracks)", size_text(shared * 2))
         } else {
             String::new()
         };
+        let size = size_text(shared);
         if shared > 10 * 1024 * 1024 {
             text(
                 ui,
-                format!("≈ {mb:.1} MB per clip{on_disk}: over Discord's 10 MB upload limit without Nitro."),
+                format!("≈ {size} per clip{on_disk}: over Discord's 10 MB upload limit without Nitro."),
                 14.0,
                 Weight::Regular,
                 YELLOW,
             );
         } else {
-            text(ui, format!("≈ {mb:.1} MB per clip{on_disk}."), 14.0, Weight::Regular, TEXT_MUTED);
+            text(ui, format!("≈ {size} per clip{on_disk}."), 14.0, Weight::Regular, TEXT_MUTED);
         }
+
+        ui.add_space(24.0);
+        format_picker(ui, cfg);
 
         ui.add_space(24.0);
         let mic_desc = if snap.mic == "unavailable" {
@@ -96,13 +99,17 @@ impl SettingsPage {
         mic_picker(ui, snap);
 
         ui.add_space(24.0);
-        let tracks_desc = if cfg.mic {
+        let dual = cfg.format.dual_track();
+        let tracks_desc = if !dual {
+            "MP3 can't hold separate tracks, so clips are saved as one mix. Pick Opus, FLAC or WAV to keep them apart."
+        } else if cfg.mic {
             "Saves other people and your voice as separate tracks in each clip, so you can share just one of \
              them later. Clips get about twice as big; copying a clip still gives Discord a normal mix."
         } else {
             "Only used while your microphone is recorded."
         };
-        if row(ui, "Keep Discord and mic as separate tracks", tracks_desc, |ui| toggle(ui, cfg.separate_tracks)).clicked() {
+        let tracks_toggle = |ui: &mut Ui| toggle_enabled(ui, cfg.separate_tracks && dual, dual);
+        if row(ui, "Keep Discord and mic as separate tracks", tracks_desc, tracks_toggle).clicked() && dual {
             set(Command::SetSeparateTracks(!cfg.separate_tracks));
         }
 
@@ -254,6 +261,53 @@ pub fn restart_bar(ui: &mut Ui) {
                     });
                 });
         });
+}
+
+/// "0.24 MB" below 1 MB (two decimals, so small formats don't all say
+/// "0.2 MB"), else "5.8 MB".
+fn size_text(bytes: u64) -> String {
+    let mb = bytes as f32 / 1_000_000.0;
+    if mb < 1.0 {
+        format!("{mb:.2} MB")
+    } else {
+        format!("{mb:.1} MB")
+    }
+}
+
+/// The Format dropdown (#8): each option says how big a 30 s clip gets, and
+/// badges mark the smallest and largest and the ones without separate tracks.
+fn format_picker(ui: &mut Ui, cfg: &Config) {
+    use crate::audio::Format;
+    text(ui, "Format", 16.0, Weight::Semibold, HEADER_PRIMARY);
+    ui.add_space(4.0);
+    text(
+        ui,
+        "What new clips are saved as. Opus and MP3 are small enough for long clips; FLAC and WAV keep every detail.",
+        14.0,
+        Weight::Regular,
+        HEADER_SECONDARY,
+    );
+    ui.add_space(8.0);
+    let options: Vec<String> = Format::ALL
+        .iter()
+        .map(|f| format!("{} · ≈ {} per 30 s", f.label(), size_text((30.0 * f.stereo_bytes_per_sec()) as u64)))
+        .collect();
+    let badges: Vec<Option<Badge>> = Format::ALL
+        .iter()
+        .map(|f| match f {
+            Format::Opus => Some(("Exceptionally small", GREEN_BTN)),
+            Format::Mp3Low | Format::Mp3High => Some(("No dual track", GRAY_BTN)),
+            Format::Wav => Some(("Exceptionally large", RED_BTN)),
+            Format::Flac => None,
+        })
+        .collect();
+    let selected = Format::ALL.iter().position(|f| *f == cfg.format);
+    let (_, picked) = dropdown_with_badges(ui, "clip-format", &options, &badges, selected, true);
+    if let Some(i) = picked {
+        if Some(i) != selected {
+            set(Command::SetFormat(Format::ALL[i]));
+        }
+    }
 }
 
 /// Which microphone to record: Windows' default communications device, or

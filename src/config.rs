@@ -15,6 +15,8 @@ pub struct Config {
     pub mic_gain: f32,
     /// Microphone endpoint id; empty = default communications device.
     pub mic_device: String,
+    /// Format new clips are saved in (#8).
+    pub format: crate::audio::Format,
     /// Save Discord and the mic as separate tracks (a 4-channel clip).
     pub separate_tracks: bool,
     pub out_dir: PathBuf,
@@ -31,6 +33,7 @@ impl Default for Config {
             mic: true,
             mic_gain: 1.0,
             mic_device: String::new(),
+            format: crate::audio::Format::Opus,
             separate_tracks: true,
             out_dir: default_out_dir(),
             clipboard: true,
@@ -132,6 +135,10 @@ impl Config {
             "mic" => self.mic = parse_bool(key, v)?,
             "mic_device" => self.mic_device = v.to_string(),
             "separate_tracks" => self.separate_tracks = parse_bool(key, v)?,
+            "format" => {
+                self.format = crate::audio::Format::from_key(v)
+                    .with_context(|| format!("format must be one of: {}", crate::audio::Format::ALL.map(|f| f.key()).join(", ")))?
+            }
             "mic_gain" => {
                 let g: f32 = v.parse().context("mic_gain must be a number")?;
                 if !(0.0..=10.0).contains(&g) {
@@ -152,6 +159,9 @@ impl Config {
     /// doesn't throw away the whole file.
     pub fn parse(text: &str) -> (Config, Vec<String>) {
         let mut cfg = Config::default();
+        // Settings files from before #8 have no `format`: those clips were
+        // WAV, so keep it that way until it's changed.
+        cfg.format = crate::audio::Format::Wav;
         let mut problems = Vec::new();
         for (i, line) in text.lines().enumerate() {
             let line = line.trim();
@@ -190,9 +200,13 @@ mic_gain = {}
 # communications microphone.
 mic_device = {}
 
+# Format new clips are saved in: opus (small, .ogg), mp3-128, mp3-192,
+# flac (lossless) or wav (uncompressed)
+format = {}
+
 # Keep Discord audio and your mic as separate tracks in each clip (a
 # 4-channel file, about twice the size). Copying a clip still gives Discord
-# a normal stereo mix.
+# a normal stereo mix. Not possible with MP3.
 separate_tracks = {}
 
 # Folder clips are saved in
@@ -212,6 +226,7 @@ check_updates = {}
             self.mic,
             self.mic_gain,
             self.mic_device,
+            self.format.key(),
             self.separate_tracks,
             self.out_dir.display(),
             self.clipboard,
@@ -262,9 +277,22 @@ mod tests {
         cfg.notifications = false;
         cfg.check_updates = false;
         cfg.separate_tracks = false;
+        cfg.format = crate::audio::Format::Mp3High;
         let (back, problems) = Config::parse(&cfg.to_text());
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(back, cfg);
+        // The default (a new settings file) round-trips too.
+        assert_eq!(Config::parse(&Config::default().to_text()).0.format, crate::audio::Format::Opus);
+    }
+
+    #[test]
+    fn old_settings_files_keep_wav() {
+        let (cfg, problems) = Config::parse("seconds = 30\n");
+        assert!(problems.is_empty());
+        assert_eq!(cfg.format, crate::audio::Format::Wav);
+        let (cfg, problems) = Config::parse("format = aac\n");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(cfg.format, crate::audio::Format::Wav);
     }
 
     #[test]

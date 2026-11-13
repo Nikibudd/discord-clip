@@ -1,9 +1,11 @@
-//! Turning ring-buffer snapshots into a WAV file you can drop into Discord.
+//! Turning ring-buffer snapshots into a clip file you can drop into Discord
+//! (in the format picked in Settings, see `audio.rs`).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::audio::Audio;
 use crate::capture::{CHANNELS, SAMPLE_RATE};
 use crate::config::Config;
 use crate::ringbuffer::RingBuffer;
@@ -12,9 +14,10 @@ use crate::ringbuffer::RingBuffer;
 /// then mic L/R.
 pub const TRACK_CHANNELS: u16 = 4;
 
-/// Snapshots the buffers and writes a timestamped WAV into the configured
-/// clips folder: with the mic and `separate_tracks` on, a 4-channel file
-/// (Discord L/R + mic L/R); otherwise both mixed into stereo.
+/// Snapshots the buffers and writes a timestamped clip in the configured
+/// format into the clips folder: with the mic and `separate_tracks` on (and
+/// a format that can hold them), a 4-channel file (Discord L/R + mic L/R);
+/// otherwise both mixed into stereo.
 pub fn save(cfg: &Config, discord: &RingBuffer, mic: Option<&RingBuffer>) -> Result<PathBuf> {
     let discord = discord.snapshot();
     let mic_samples = mic.map(|m| m.snapshot()).unwrap_or_default();
@@ -24,12 +27,13 @@ pub fn save(cfg: &Config, discord: &RingBuffer, mic: Option<&RingBuffer>) -> Res
 
     std::fs::create_dir_all(&cfg.out_dir)
         .with_context(|| format!("creating {}", cfg.out_dir.display()))?;
-    let path = timestamped_path(&cfg.out_dir);
-    if cfg.separate_tracks && mic.is_some() {
-        write_wav_channels(&path, &interleave_tracks(&discord, &mic_samples, cfg.mic_gain), TRACK_CHANNELS)?;
+    let path = timestamped_path(&cfg.out_dir, cfg.format.extension());
+    let audio = if cfg.separate_tracks && mic.is_some() && cfg.format.dual_track() {
+        Audio { samples: interleave_tracks(&discord, &mic_samples, cfg.mic_gain), channels: TRACK_CHANNELS, rate: SAMPLE_RATE }
     } else {
-        write_wav(&path, &mix(&[(&discord, 1.0), (&mic_samples, cfg.mic_gain)]))?;
-    }
+        Audio { samples: mix(&[(&discord, 1.0), (&mic_samples, cfg.mic_gain)]), channels: CHANNELS, rate: SAMPLE_RATE }
+    };
+    crate::audio::write(&path, &audio, cfg.format)?;
     Ok(path)
 }
 
@@ -69,6 +73,7 @@ pub fn mix(tracks: &[(&[f32], f32)]) -> Vec<f32> {
 
 /// Writes 16-bit PCM: 30s of 48kHz stereo is ~5.8MB, which fits under
 /// Discord's 10MB free upload limit (32-bit float would not).
+#[cfg(test)]
 pub fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
     write_wav_channels(path, samples, CHANNELS)
 }
@@ -104,28 +109,17 @@ pub fn fix_channel_mask(path: &Path) -> Result<()> {
 /// Like `write_wav` with any number of interleaved channels. More than two
 /// channels are written as WAVE_FORMAT_EXTENSIBLE (by hound); 4 are
 /// labelled quad.
+#[cfg(test)]
 pub fn write_wav_channels(path: &Path, samples: &[f32], channels: u16) -> Result<()> {
-    let spec = hound::WavSpec {
-        channels,
-        sample_rate: SAMPLE_RATE,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut w = hound::WavWriter::create(path, spec)?;
-    for &s in samples {
-        w.write_sample((s * 32767.0).round() as i16)?;
-    }
-    w.finalize()?;
-    if channels == TRACK_CHANNELS {
-        fix_channel_mask(path)?;
-    }
-    Ok(())
+    let audio = Audio { samples: samples.to_vec(), channels, rate: SAMPLE_RATE };
+    crate::audio::write(path, &audio, crate::audio::Format::Wav)
 }
 
-pub fn timestamped_path(dir: &Path) -> PathBuf {
+/// `discord_clip_YYYYMMDD_HHMMSS.<extension>` in `dir`.
+pub fn timestamped_path(dir: &Path, extension: &str) -> PathBuf {
     let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
     dir.join(format!(
-        "discord_clip_{:04}{:02}{:02}_{:02}{:02}{:02}.wav",
+        "discord_clip_{:04}{:02}{:02}_{:02}{:02}{:02}.{extension}",
         t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
     ))
 }
