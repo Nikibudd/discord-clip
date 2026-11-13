@@ -121,8 +121,10 @@ impl EditDialog {
                 self.contents(ui, &mut choice);
             });
         // Esc always cancels; a click outside only when there's nothing to
-        // lose, so a stray click doesn't throw away edits.
-        if choice.is_none() && modal.should_close() && (!self.changed() || ctx.input(|i| i.key_pressed(egui::Key::Escape))) {
+        // lose, so a stray click doesn't throw away edits. (`should_close`
+        // consumes the Esc key press, so it can't be checked afterwards.)
+        let stray_click = modal.backdrop_response.clicked() && self.changed();
+        if choice.is_none() && !stray_click && modal.should_close() {
             choice = Some(Choice::Cancel);
         }
         if choice.is_some() {
@@ -261,6 +263,20 @@ impl EditDialog {
         let frac_at = |x: f32| ((x - left) / (right - left)).clamp(0.0, 1.0);
         let min_gap = (MIN_SECONDS / self.seconds).min(1.0);
 
+        // Scrubbing, like on the cards: click or drag on the waveforms to move
+        // the playhead (inside the selection). While dragging, the playhead
+        // follows the mouse; playback jumps there on release. Registered
+        // before the handles so they win where they overlap.
+        let (sel_start, sel_end) = (self.start, self.end);
+        let in_selection = |f: f32| f.min(sel_end - 0.001).max(sel_start);
+        let scrub = ui
+            .interact(panel, ui.make_persistent_id("edit-scrub"), Sense::click_and_drag())
+            .on_hover_cursor(CursorIcon::PointingHand);
+        let pointer_at = scrub.interact_pointer_pos().map(|p| in_selection(frac_at(p.x)));
+        let dragging = scrub.dragged() || scrub.is_pointer_button_down_on();
+        let drag_at = pointer_at.filter(|_| dragging);
+        let released_at = pointer_at.filter(|_| scrub.drag_stopped() || scrub.clicked());
+
         // Handles: drag to move. They span all tracks.
         let mut hovered_handle = false;
         for handle in [Handle::Start, Handle::End] {
@@ -283,8 +299,12 @@ impl EditDialog {
             }
         }
 
+        if let Some(at) = released_at {
+            self.seek(at);
+        }
+        // Where it was let go, not the old spot (see #12).
+        let head = drag_at.or(released_at).or(self.player.as_ref().map(|p| p.position()));
         let painter = ui.painter();
-        let head = self.player.as_ref().map(|p| p.position());
         for (t, peaks) in self.tracks.iter().enumerate() {
             let top = panel.top() + t as f32 * (track_h + TRACK_GAP);
             let rect = Rect::from_x_y_ranges(panel.x_range(), top..=top + track_h);
@@ -365,6 +385,18 @@ impl EditDialog {
                 }
                 Err(e) => Err(e),
             },
+        };
+        if let Err(e) = result {
+            self.error = Some(format!("Couldn't play the clip: {e:#}"));
+        }
+    }
+
+    /// Moves the playhead to `at` (0..=1 of the clip): keeps playing or
+    /// paused, or starts playing there if nothing was loaded.
+    fn seek(&mut self, at: f32) {
+        let result = match &mut self.player {
+            Some(p) => p.seek(at),
+            None => Playback::start(&self.clip.path, at, self.volumes).map(|p| self.player = Some(p)),
         };
         if let Err(e) = result {
             self.error = Some(format!("Couldn't play the clip: {e:#}"));
