@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui;
 
-use super::theme::{apply, Palette};
+use super::theme::{apply, Backdrop, Palette};
 use crate::config::ThemeMode;
 use crate::discord_theme::{self, Base, DiscordTheme};
 
@@ -23,7 +23,7 @@ pub struct Follower {
     /// Whether the last read worked (`None` = not read yet).
     last_read_ok: Option<bool>,
     reading: Option<Receiver<Option<DiscordTheme>>>,
-    applied: Option<Palette>,
+    applied: Option<(Palette, Option<Backdrop>)>,
 }
 
 impl Follower {
@@ -68,14 +68,14 @@ impl Follower {
             }
         }
 
-        let palette = match mode {
-            ThemeMode::Dark => Palette::DARK,
-            ThemeMode::Light => Palette::LIGHT,
-            ThemeMode::Discord => self.discord.as_ref().map_or(Palette::DARK, Palette::from_discord),
+        let look = match (mode, &self.discord) {
+            (ThemeMode::Dark, _) | (ThemeMode::Discord, None) => (Palette::DARK, None),
+            (ThemeMode::Light, _) => (Palette::LIGHT, None),
+            (ThemeMode::Discord, Some(theme)) => (Palette::from_discord(theme), Backdrop::from_discord(theme)),
         };
-        if self.applied != Some(palette) {
-            apply(ctx, palette);
-            self.applied = Some(palette);
+        if self.applied.as_ref() != Some(&look) {
+            apply(ctx, look.0, look.1.clone());
+            self.applied = Some(look);
         }
     }
 

@@ -57,12 +57,43 @@ impl Base {
     }
 }
 
-/// A Nitro gradient or custom theme: its colours, and how strongly they tint
-/// the backgrounds (Discord's "base mix", 0–1).
+/// A Nitro gradient preset or custom theme: a CSS-style linear gradient,
+/// and how strongly it tints the colours (Discord's "base mix").
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tint {
-    pub colors: Vec<[u8; 3]>,
+    /// Colour stops: colour and position along the gradient (0–1).
+    pub stops: Vec<([u8; 3], f32)>,
+    /// CSS angle in degrees: 0 = towards the top, 90 = towards the right.
+    pub angle: f32,
+    /// A custom theme; Discord mixes those in differently than presets.
+    pub custom: bool,
+    /// Base mix of a custom theme, 0–1 (0.5 for presets).
     pub mix: f32,
+}
+
+impl Tint {
+    /// The colours the backgrounds are tinted with: (dark themes, Light).
+    /// Like Discord: presets use their first and last colour, custom themes
+    /// their darkest and lightest; a grey dark colour gives way to the other.
+    pub fn base_colors(&self) -> Option<([u8; 3], [u8; 3])> {
+        let luminance = |c: &[u8; 3]| {
+            let lin = |v: u8| {
+                let v = v as f32 / 255.0;
+                if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+        };
+        let colors: Vec<[u8; 3]> = self.stops.iter().map(|(c, _)| *c).collect();
+        let (dark, light) = if self.custom {
+            let by = |a: &&[u8; 3], b: &&[u8; 3]| luminance(a).total_cmp(&luminance(b));
+            (*colors.iter().min_by(by)?, *colors.iter().max_by(by)?)
+        } else {
+            let (first, last) = (*colors.first()?, *colors.last()?);
+            if luminance(&first) > luminance(&last) { (last, first) } else { (first, last) }
+        };
+        let grey = |c: [u8; 3]| c.iter().max() == c.iter().min();
+        Some((if grey(dark) && !self.custom { light } else { dark }, light))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -230,8 +261,8 @@ fn message<'a>(data: &'a [u8], number: u64) -> Option<&'a [u8]> {
 
 /// The active gradient or custom theme from the cached synced settings
 /// (`PreloadedUserSettings`): field 13 appearance → 3 client theme settings
-/// → 2 gradient preset id (wrapped), or 4 custom theme (1 colours, 4 base
-/// mix). Only that part of the message is looked at.
+/// → 2 gradient preset id (wrapped), or 4 custom theme (1 colours, 3 angle,
+/// 4 base mix). Only that part of the message is looked at.
 ///
 /// `Some(None)` = the settings say there's no gradient or custom theme;
 /// `None` = they don't say (fall back to `ClientThemesBackgroundStore`).
@@ -239,21 +270,32 @@ fn client_theme(settings: &[u8]) -> Option<Option<Tint>> {
     let appearance = message(settings, 13)?;
     let Some(client) = message(appearance, 3) else { return Some(None) };
     if let Some(custom) = message(client, 4) {
+        let number = |f: &Field| match *f {
+            Field::Varint(v) => Some(v as i32 as f32),
+            Field::Fixed32(v) => Some(f32::from_bits(v)),
+            Field::Bytes(_) => None,
+        };
         let mut colors = Vec::new();
-        let mut mix = DEFAULT_MIX;
+        let (mut angle, mut mix) = (0.0, DEFAULT_MIX);
         for (n, f) in fields(custom) {
-            match (n, f) {
-                (1, Field::Bytes(b)) => colors.extend(std::str::from_utf8(b).ok().and_then(hex_color)),
-                (4, Field::Varint(v)) => mix = (v as f32 / 100.0).clamp(0.0, 1.0),
-                (4, Field::Fixed32(v)) => {
-                    let v = f32::from_bits(v);
-                    mix = if v > 1.0 { v / 100.0 } else { v }.clamp(0.0, 1.0);
+            match n {
+                1 => {
+                    if let Field::Bytes(b) = f {
+                        colors.extend(std::str::from_utf8(b).ok().and_then(hex_color));
+                    }
+                }
+                3 => angle = number(&f).filter(|a| a.is_finite()).unwrap_or(0.0),
+                // Stored in percent (an older version may have used 0–1).
+                4 => {
+                    if let Some(v) = number(&f) {
+                        mix = if v > 1.0 { v / 100.0 } else { v }.clamp(0.0, 1.0);
+                    }
                 }
                 _ => {}
             }
         }
         if !colors.is_empty() {
-            return Some(Some(Tint { colors, mix }));
+            return Some(Some(Tint { stops: spread(&colors), angle, custom: true, mix }));
         }
     }
     if let Some(wrapped) = message(client, 2) {
@@ -276,36 +318,60 @@ fn hex_color(s: &str) -> Option<[u8; 3]> {
     Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
 }
 
-/// Nitro gradient presets, by Discord's id.
+/// Colours spread evenly over the gradient, like CSS stops without
+/// positions (one colour fills the whole gradient).
+fn spread(colors: &[[u8; 3]]) -> Vec<([u8; 3], f32)> {
+    match colors {
+        [] => vec![],
+        [c] => vec![(*c, 0.0), (*c, 1.0)],
+        _ => {
+            let last = (colors.len() - 1) as f32;
+            colors.iter().enumerate().map(|(i, c)| (*c, i as f32 / last)).collect()
+        }
+    }
+}
+
+/// Nitro gradient presets, by Discord's id: colour stops (colour, position
+/// in percent) and angle, from Discord's web client (Nov 2026).
 fn preset(id: u64) -> Option<Tint> {
-    let hex: &[&str] = match id {
-        0 => &["#56b69f", "#63bc61", "#9eca67"],
-        1 => &["#f3b336", "#ee8558"],
-        2 => &["#3a7ca1", "#7f7eb9"],
-        3 => &["#efaab3", "#efd696", "#a6daa2"],
-        4 => &["#9f4175", "#c49064", "#a6953d"],
-        5 => &["#f4abb8", "#b1c2fc"],
-        6 => &["#a4c0f7", "#a9e4e8", "#b0e2b8", "#cfdfa2"],
-        7 => &["#e7dbd0", "#dfd0b2", "#e0d6a3"],
-        8 => &["#48288c", "#db7f4b"],
-        9 => &["#0eb5bf", "#4c0ce0", "#a308a7", "#9a53ff", "#218be0"],
-        10 => &["#142215", "#2d4d39", "#454c32", "#5a7c58", "#a98e4b"],
-        11 => &["#950909", "#000000"],
-        12 => &["#5348ca", "#140730"],
-        13 => &["#895240", "#8f4343"],
-        14 => &["#665069", "#91a3d1"],
-        15 => &["#647962", "#588575", "#6a8482"],
-        16 => &["#7289da", "#4e5d94"],
-        17 => &["#3a7ca1", "#58579a"],
-        18 => &["#01a89e", "#7d60ba", "#b43898"],
-        19 => &["#857664", "#5b4421"],
-        20 => &["#af1a6c", "#c26b20", "#e7a525"],
-        21 => &["#062053", "#191fbb", "#13929a", "#218573", "#051a81"],
-        22 => &["#2c3fe7", "#261d83"],
-        23 => &["#f89a03", "#ff6698", "#af01f3", "#4645ff"],
+    let (stops, angle): (&[(&str, f32)], f32) = match id {
+        0 => (&[("#56b69f", 6.15), ("#63bc61", 48.7), ("#9eca67", 93.07)], 180.0),
+        1 => (&[("#f3b336", 31.1), ("#ee8558", 67.09)], 180.0),
+        2 => (&[("#3a7ca1", 5.64), ("#7f7eb9", 26.38), ("#7f7eb9", 49.92), ("#3a7ca1", 73.12)], 148.71),
+        3 => (&[("#efaab3", 3.56), ("#efd696", 35.49), ("#a6daa2", 68.78)], 38.08),
+        4 => (&[("#9f4175", 8.62), ("#c49064", 48.07), ("#a6953d", 76.04)], 154.19),
+        5 => (&[("#f4abb8", 8.5), ("#b1c2fc", 94.28)], 180.14),
+        6 => (&[("#a4c0f7", 7.08), ("#a9e4e8", 34.94), ("#b0e2b8", 65.12), ("#cfdfa2", 96.23)], 179.52),
+        7 => (&[("#e7dbd0", 12.92), ("#dfd0b2", 32.92), ("#e0d6a3", 52.11)], 38.99),
+        8 => (&[("#48288c", 27.57), ("#db7f4b", 71.25)], 141.68),
+        9 => (
+            &[("#0eb5bf", 3.94), ("#4c0ce0", 26.1), ("#a308a7", 39.82), ("#9a53ff", 56.89), ("#218be0", 76.45)],
+            128.92,
+        ),
+        10 => (
+            &[("#142215", 11.2), ("#2d4d39", 29.93), ("#454c32", 48.64), ("#5a7c58", 67.85), ("#a98e4b", 83.54)],
+            162.27,
+        ),
+        11 => (&[("#950909", 16.17), ("#000000", 72.0)], 64.92),
+        12 => (&[("#5348ca", 11.21), ("#140730", 61.92)], 48.17),
+        13 => (&[("#895240", 14.61), ("#8f4343", 74.62)], 170.82),
+        14 => (&[("#665069", 12.84), ("#91a3d1", 85.99)], 180.0),
+        15 => (&[("#647962", 1.91), ("#588575", 48.99), ("#6a8482", 96.35)], 179.14),
+        16 => (&[("#7289da", 4.0), ("#4e5d94", 96.0)], 180.0),
+        17 => (&[("#3a7ca1", 5.64), ("#58579a", 26.38), ("#58579a", 49.92), ("#3a7ca1", 73.12)], 148.71),
+        18 => (&[("#01a89e", 0.0), ("#7d60ba", 50.0), ("#b43898", 100.0)], 180.0),
+        19 => (&[("#857664", 14.14), ("#5b4421", 60.35)], 69.98),
+        20 => (&[("#af1a6c", 18.79), ("#c26b20", 49.76), ("#e7a525", 80.72)], 161.03),
+        21 => (
+            &[("#062053", 10.39), ("#191fbb", 26.87), ("#13929a", 48.31), ("#218573", 64.98), ("#051a81", 92.5)],
+            239.16,
+        ),
+        22 => (&[("#2c3fe7", 11.18), ("#261d83", 64.54)], 47.61),
+        23 => (&[("#4645ff", 0.0), ("#af01f3", 33.33), ("#ff6698", 66.67), ("#f89a03", 100.0)], 135.0),
         _ => return None,
     };
-    Some(Tint { colors: hex.iter().filter_map(|h| hex_color(h)).collect(), mix: DEFAULT_MIX })
+    let stops = stops.iter().filter_map(|(h, at)| Some((hex_color(h)?, at / 100.0))).collect();
+    Some(Tint { stops, angle, custom: false, mix: DEFAULT_MIX })
 }
 
 // ---------------------------------------------------------------------------
@@ -320,8 +386,8 @@ impl DiscordTheme {
     fn to_text(&self) -> String {
         let mut out = format!("base = {}\nsaturation = {}\n", self.base.id(), self.saturation);
         if let Some(t) = &self.tint {
-            let colors: Vec<String> = t.colors.iter().map(|[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}")).collect();
-            out += &format!("tint = {}\nmix = {}\n", colors.join(","), t.mix);
+            let stops: Vec<String> = t.stops.iter().map(|([r, g, b], at)| format!("#{r:02x}{g:02x}{b:02x}@{at}")).collect();
+            out += &format!("stops = {}\nangle = {}\ncustom = {}\nmix = {}\n", stops.join(","), t.angle, t.custom, t.mix);
         }
         out
     }
@@ -335,11 +401,20 @@ impl DiscordTheme {
         };
         let base = Base::from_id(get("base")?)?;
         let saturation = get("saturation").and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0).clamp(0.0, 1.0);
-        let tint = get("tint").map(|colors| Tint {
-            colors: colors.split(',').filter_map(hex_color).collect(),
-            mix: get("mix").and_then(|m| m.parse::<f32>().ok()).unwrap_or(DEFAULT_MIX).clamp(0.0, 1.0),
+        let number = |key: &str| get(key).and_then(|v| v.parse::<f32>().ok()).filter(|v| v.is_finite());
+        let tint = get("stops").map(|stops| Tint {
+            stops: stops
+                .split(',')
+                .filter_map(|s| {
+                    let (color, at) = s.split_once('@')?;
+                    Some((hex_color(color)?, at.trim().parse::<f32>().ok()?.clamp(0.0, 1.0)))
+                })
+                .collect(),
+            angle: number("angle").unwrap_or(0.0),
+            custom: get("custom") == Some("true"),
+            mix: number("mix").unwrap_or(DEFAULT_MIX).clamp(0.0, 1.0),
         });
-        Some(DiscordTheme { base, tint: tint.filter(|t| !t.colors.is_empty()), saturation })
+        Some(DiscordTheme { base, tint: tint.filter(|t| !t.stops.is_empty()), saturation })
     }
 }
 
@@ -441,19 +516,24 @@ mod tests {
         // Private fields around the appearance are ignored.
         let mut custom = proto_bytes(1, b"#331895");
         custom.extend(proto_bytes(1, b"#290A42"));
+        proto_field(3, 0, &mut custom);
+        custom.push(97);
         proto_field(4, 0, &mut custom);
         custom.push(53);
         let mut settings = proto_bytes(2, b"private stuff");
         settings.extend(proto_bytes(13, &proto_bytes(3, &proto_bytes(4, &custom))));
         let tint = client_theme(&settings).unwrap().unwrap();
-        assert_eq!(tint.colors, vec![[0x33, 0x18, 0x95], [0x29, 0x0A, 0x42]]);
+        assert_eq!(tint.stops, vec![([0x33, 0x18, 0x95], 0.0), ([0x29, 0x0A, 0x42], 1.0)]);
+        assert_eq!((tint.angle, tint.custom), (97.0, true));
         assert!((tint.mix - 0.53).abs() < 1e-6);
 
         let mut wrapped = Vec::new();
         proto_field(1, 0, &mut wrapped);
         wrapped.push(12);
         let settings = proto_bytes(13, &proto_bytes(3, &proto_bytes(2, &wrapped)));
-        assert_eq!(client_theme(&settings).unwrap().unwrap().colors[0], [0x53, 0x48, 0xca]);
+        let preset = client_theme(&settings).unwrap().unwrap();
+        assert_eq!(preset.stops[0], ([0x53, 0x48, 0xca], 0.1121));
+        assert_eq!((preset.angle, preset.custom), (48.17, false));
 
         // Appearance without a client theme: no tint. No appearance: unknown.
         assert_eq!(client_theme(&proto_bytes(13, &[0x08, 0x03])), Some(None));
@@ -464,7 +544,7 @@ mod tests {
     fn remembered_theme_round_trips() {
         let theme = DiscordTheme {
             base: Base::Dark,
-            tint: Some(Tint { colors: vec![[0x33, 0x18, 0x95], [0x29, 0x0A, 0x42]], mix: 0.53 }),
+            tint: Some(Tint { stops: spread(&[[0x33, 0x18, 0x95], [0x29, 0x0A, 0x42]]), angle: 97.0, custom: true, mix: 0.53 }),
             saturation: 0.8,
         };
         assert_eq!(DiscordTheme::from_text(&theme.to_text()), Some(theme));

@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use eframe::egui::{self, vec2, Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke};
+use eframe::egui::{self, pos2, vec2, Color32, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, Stroke};
 use windows::Win32::Foundation::HWND;
 
 use crate::discord_theme::{Base, DiscordTheme, Tint};
@@ -268,21 +268,24 @@ impl Palette {
         ]
     }
 
-    /// Like Discord: the darkest theme colour (lightest on Light) at full
+    /// Like Discord: the theme's dark colour (light on Light) at full
     /// saturation and 5 % (90 %) lightness is mixed into every background,
-    /// `color-mix(in oklab, <background> 100%, <tint> <mix>%)`.
+    /// `color-mix(in oklab, <background> 100%, <tint> <amount>%)`.
     fn tint(&mut self, tint: &Tint) {
-        let luma = |c: &[u8; 3]| 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32;
-        let pick = if self.dark {
-            tint.colors.iter().min_by(|a, b| luma(a).total_cmp(&luma(b)))
-        } else {
-            tint.colors.iter().max_by(|a, b| luma(a).total_cmp(&luma(b)))
-        };
-        let Some(&[r, g, b]) = pick else { return };
+        let Some((dark, light)) = tint.base_colors() else { return };
+        let [r, g, b] = if self.dark { dark } else { light };
         let (h, _, _) = to_hsl(rgb(r, g, b));
         let color = from_hsl(h, 1.0, if self.dark { 0.05 } else { 0.90 });
+        // Presets mix in 50 %; custom themes follow their base mix (Discord's
+        // `--custom-theme-base-color-amount`).
+        let base_mix = tint.mix * 100.0;
+        let amount = match (tint.custom, self.dark) {
+            (false, _) => 50.0,
+            (true, true) => 60.0 + 0.4 * (100.0 - base_mix),
+            (true, false) => 30.0 - 0.2 * base_mix,
+        };
         // CSS scales percentages that add up to more than 100 %.
-        let w = tint.mix / (1.0 + tint.mix);
+        let w = amount / (100.0 + amount);
         // The first 11 colours are the backgrounds.
         for c in self.colors_mut().into_iter().take(11) {
             *c = mix_oklab(*c, color, w);
@@ -299,25 +302,141 @@ impl Palette {
     }
 }
 
-/// The palette in use; the window changes it when the theme changes.
+/// The gradient of a Nitro theme, drawn behind the sidebar and the content
+/// area (#39). Like Discord, each area shows the gradient under a black
+/// (white on Light) overlay; cards, inputs and menus stay solid on top.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Backdrop {
+    /// Colour stops: colour and position along the gradient (0–1).
+    stops: Vec<(Color32, f32)>,
+    /// CSS angle in degrees: 0 = towards the top, 90 = towards the right.
+    angle: f32,
+    overlay: Color32,
+    /// Overlay opacity of the content area, the sidebar and the title bar.
+    pub content: f32,
+    pub sidebar: f32,
+    frame: f32,
+}
+
+impl Backdrop {
+    /// Overlay opacities from Discord's CSS (`--custom-background-gradient-*`):
+    /// content = "chat", sidebar = "lowest", title bar = "app-frame".
+    pub fn from_discord(theme: &DiscordTheme) -> Option<Backdrop> {
+        let tint = theme.tint.as_ref()?;
+        let dark = theme.base != Base::Light;
+        let saturation = theme.saturation;
+        let stops: Vec<(Color32, f32)> = tint
+            .stops
+            .iter()
+            .map(|&([r, g, b], at)| {
+                let c = rgb(r, g, b);
+                (if saturation < 0.999 { saturate(c, saturation) } else { c }, at)
+            })
+            .collect();
+        if stops.is_empty() {
+            return None;
+        }
+        let (content, sidebar, frame) = if tint.custom {
+            let m = (30.0 + 0.7 * (100.0 - tint.mix * 100.0)) / 100.0;
+            if dark {
+                (0.48 + m * 0.32, 0.54 + m * 0.36, 0.42 + m * 0.28)
+            } else {
+                (0.85 * (0.6 + m * 0.4), 0.51 + m * 0.34, 0.325 + m * 0.325)
+            }
+        } else if dark {
+            (0.8, 0.9, 0.7)
+        } else {
+            (0.85, 0.85, 0.65)
+        };
+        let overlay = if dark { Color32::BLACK } else { Color32::WHITE };
+        Some(Backdrop { stops, angle: tint.angle, overlay, content, sidebar, frame })
+    }
+
+    /// The gradient's colour at `t` (0–1 along the gradient line).
+    fn color_at(&self, t: f32) -> Color32 {
+        let first = self.stops[0];
+        let last = self.stops[self.stops.len() - 1];
+        if t <= first.1 {
+            return first.0;
+        }
+        for w in self.stops.windows(2) {
+            let ((a, at), (b, bt)) = (w[0], w[1]);
+            if t <= bt {
+                let span = bt - at;
+                return if span <= 1e-6 { b } else { mix(a, b, (t - at) / span) };
+            }
+        }
+        last.0
+    }
+
+    /// Like CSS `linear-gradient(<angle>deg, …)` over `window`: the colour
+    /// at `p`, under the overlay at `opacity`.
+    fn at(&self, window: Rect, p: Pos2, opacity: f32) -> Color32 {
+        let a = self.angle.to_radians();
+        let dir = vec2(a.sin(), -a.cos());
+        let len = (window.width() * a.sin()).abs() + (window.height() * a.cos()).abs();
+        let t = if len > 0.0 { (p - window.center()).dot(dir) / len + 0.5 } else { 0.5 };
+        mix(self.color_at(t), self.overlay, opacity)
+    }
+
+    /// Paints `area` of the gradient (which spans `window`), as a grid fine
+    /// enough that its straight colour blends follow the stops.
+    pub fn paint(&self, painter: &egui::Painter, window: Rect, area: Rect, opacity: f32) {
+        const CELLS: usize = 24;
+        let mut mesh = egui::Mesh::default();
+        for row in 0..=CELLS {
+            for col in 0..=CELLS {
+                let p = area.min + vec2(area.width() * col as f32, area.height() * row as f32) / CELLS as f32;
+                mesh.colored_vertex(p, self.at(window, p, opacity));
+            }
+        }
+        let w = (CELLS + 1) as u32;
+        for row in 0..CELLS as u32 {
+            for col in 0..CELLS as u32 {
+                let i = row * w + col;
+                mesh.add_triangle(i, i + 1, i + w);
+                mesh.add_triangle(i + 1, i + w + 1, i + w);
+            }
+        }
+        painter.add(mesh);
+    }
+
+    /// The title bar can only have one colour: the gradient at its middle.
+    fn caption(&self) -> Color32 {
+        let window = Rect::from_min_size(Pos2::ZERO, vec2(920.0, 640.0));
+        self.at(window, pos2(window.center().x, 0.0), self.frame)
+    }
+}
+
+/// The palette and gradient in use; the window changes them when the theme
+/// changes.
 static PALETTE: RwLock<Palette> = RwLock::new(Palette::DARK);
+static BACKDROP: RwLock<Option<Backdrop>> = RwLock::new(None);
 
 /// The current colours.
 pub fn pal() -> Palette {
     *PALETTE.read().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Switches to `palette`: colours, egui's style and the title bar.
-pub fn apply(ctx: &egui::Context, palette: Palette) {
+/// The current gradient, if the theme has one.
+pub fn backdrop() -> Option<Backdrop> {
+    BACKDROP.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Switches to `palette` and `backdrop`: colours, egui's style and the
+/// title bar.
+pub fn apply(ctx: &egui::Context, palette: Palette, backdrop: Option<Backdrop>) {
     *PALETTE.write().unwrap_or_else(|e| e.into_inner()) = palette;
-    setup_style(ctx, &palette);
+    let caption = backdrop.as_ref().map(Backdrop::caption);
+    *BACKDROP.write().unwrap_or_else(|e| e.into_inner()) = backdrop;
+    setup_style(ctx, &palette, caption.is_some());
     if let Some(hwnd) = super::window_hwnd() {
-        style_title_bar(hwnd, &palette);
+        style_title_bar(hwnd, &palette, caption);
     }
     ctx.request_repaint();
 }
 
-fn setup_style(ctx: &egui::Context, p: &Palette) {
+fn setup_style(ctx: &egui::Context, p: &Palette, gradient: bool) {
     ctx.set_theme(if p.dark { egui::Theme::Dark } else { egui::Theme::Light });
     ctx.all_styles_mut(|style| {
         style.spacing.item_spacing = vec2(8.0, 0.0);
@@ -327,7 +446,8 @@ fn setup_style(ctx: &egui::Context, p: &Palette) {
         v.dark_mode = p.dark;
         v.panel_fill = p.bg_primary;
         v.window_fill = p.bg_primary;
-        v.extreme_bg_color = p.bg_tertiary;
+        // Only used for the scrollbar track: let a gradient show through it.
+        v.extreme_bg_color = if gradient { p.bg_tertiary.gamma_multiply(0.3) } else { p.bg_tertiary };
         v.faint_bg_color = p.bg_secondary;
         v.hyperlink_color = p.link;
         v.selection.bg_fill = BLURPLE;
@@ -345,15 +465,15 @@ fn setup_style(ctx: &egui::Context, p: &Palette) {
 }
 
 /// Native title bar in the theme's colours (dark mode on Windows 10 20H1+,
-/// the caption colour on Windows 11).
-pub fn style_title_bar(hwnd: HWND, p: &Palette) {
+/// the caption colour on Windows 11, `caption` if given).
+pub fn style_title_bar(hwnd: HWND, p: &Palette, caption: Option<Color32>) {
     use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
     const DWMWA_USE_IMMERSIVE_DARK_MODE: i32 = 20;
     const DWMWA_CAPTION_COLOR: i32 = 35;
     const DWMWA_TEXT_COLOR: i32 = 36;
     let colorref = |c: Color32| u32::from(c.r()) | u32::from(c.g()) << 8 | u32::from(c.b()) << 16;
     let dark: i32 = p.dark.into();
-    let caption = colorref(p.bg_tertiary);
+    let caption = colorref(caption.unwrap_or(p.bg_tertiary));
     let text = colorref(p.header_primary);
     let set = |attr: i32, value: *const c_void| unsafe {
         let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(attr), value, 4);
@@ -473,7 +593,12 @@ mod tests {
     fn custom_theme_tints_backgrounds_only() {
         let theme = DiscordTheme {
             base: Base::Dark,
-            tint: Some(Tint { colors: vec![[0x33, 0x18, 0x95], [0x29, 0x0A, 0x42]], mix: 0.53 }),
+            tint: Some(Tint {
+                stops: vec![([0x33, 0x18, 0x95], 0.0), ([0x29, 0x0A, 0x42], 1.0)],
+                angle: 97.0,
+                custom: true,
+                mix: 0.53,
+            }),
             saturation: 1.0,
         };
         let p = Palette::from_discord(&theme);
@@ -481,6 +606,34 @@ mod tests {
         // Purple-ish: more blue than green.
         assert!(p.bg_primary.b() > p.bg_primary.g(), "{:?}", p.bg_primary);
         assert_eq!(p.text_normal, Palette::DARK.text_normal);
-        assert_eq!(Palette::from_discord(&DiscordTheme { tint: None, ..theme }), Palette::DARK);
+        let plain = DiscordTheme { tint: None, ..theme };
+        assert_eq!(Palette::from_discord(&plain), Palette::DARK);
+        assert_eq!(Backdrop::from_discord(&plain), None);
+    }
+
+    #[test]
+    fn backdrop_follows_css_linear_gradient() {
+        let theme = DiscordTheme {
+            base: Base::Dark,
+            tint: Some(Tint {
+                stops: vec![([255, 0, 0], 0.25), ([0, 0, 255], 0.75)],
+                angle: 180.0,
+                custom: false,
+                mix: 0.5,
+            }),
+            saturation: 1.0,
+        };
+        let b = Backdrop::from_discord(&theme).unwrap();
+        let window = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0));
+        // 180deg runs top to bottom: red above the first stop, blue below the
+        // last, half way in between in the middle.
+        assert_eq!(b.at(window, pos2(10.0, 0.0), 0.0), rgb(255, 0, 0));
+        assert_eq!(b.at(window, pos2(390.0, 200.0), 0.0), rgb(0, 0, 255));
+        assert_eq!(b.at(window, pos2(200.0, 100.0), 0.0), rgb(128, 0, 128));
+        // 90deg runs left to right.
+        let side = Backdrop { angle: 90.0, ..b.clone() };
+        assert_eq!(side.at(window, pos2(0.0, 0.0), 0.0), rgb(255, 0, 0));
+        // The overlay darkens it.
+        assert_eq!(b.at(window, pos2(10.0, 0.0), b.content), rgb(51, 0, 0));
     }
 }
