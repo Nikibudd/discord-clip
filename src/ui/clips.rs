@@ -209,7 +209,10 @@ impl ClipsPage {
         if !all.is_empty() {
             ui.allocate_ui_with_layout(vec2(width, 40.0), Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
-                search_box(ui, &mut self.search);
+                // In its own area: its text field is placed with `put`, which
+                // would otherwise move the row's cursor back over the box.
+                let search_w = (ui.available_width() - 182.0).clamp(160.0, 360.0);
+                ui.allocate_ui(vec2(search_w, 40.0), |ui| search_box(ui, &mut self.search));
                 ui.allocate_ui(vec2(170.0, 40.0), |ui| {
                     let options: Vec<String> = Filter::ALL.iter().map(|f| f.label().to_string()).collect();
                     let selected = Filter::ALL.iter().position(|f| *f == self.filter);
