@@ -32,6 +32,9 @@ pub struct TrimDialog {
     /// Volumes of the clip's tracks (#7), for playback.
     volumes: Volumes,
     error: Option<String>,
+    /// Opened from Make Discord-ready on a clip that's too long (#25): the
+    /// selection can't be longer than the soundboard takes.
+    soundboard: bool,
 }
 
 /// What the user chose in the dialog.
@@ -40,6 +43,8 @@ pub enum Choice {
     SaveNew { start: f32, end: f32 },
     Replace { start: f32, end: f32 },
     Copy { start: f32, end: f32 },
+    /// Make the selection Discord-ready and replace the clip with it (#25).
+    DiscordReady { start: f32, end: f32 },
 }
 
 #[derive(Clone, Copy)]
@@ -60,7 +65,27 @@ impl TrimDialog {
             player: None,
             volumes,
             error: None,
+            soundboard: false,
         })
+    }
+
+    /// For a clip too long for the soundboard (#25): the selection starts as
+    /// its last few seconds (where the moment usually is, since a clip ends
+    /// when the hotkey is pressed) and can't get longer than the limit.
+    pub fn open_for_soundboard(clip: &ClipFile, volumes: Volumes) -> anyhow::Result<TrimDialog> {
+        let mut d = TrimDialog::open(clip, volumes)?;
+        d.soundboard = true;
+        d.start = (1.0 - library::SOUNDBOARD_MAX_SECONDS / d.seconds).max(0.0);
+        Ok(d)
+    }
+
+    /// The longest selection allowed, 0..=1 of the clip.
+    fn max_gap(&self) -> f32 {
+        if self.soundboard {
+            (library::SOUNDBOARD_MAX_SECONDS / self.seconds).min(1.0)
+        } else {
+            1.0
+        }
     }
 
     pub fn clip(&self) -> &ClipFile {
@@ -96,10 +121,24 @@ impl TrimDialog {
     }
 
     fn contents(&mut self, ui: &mut Ui, choice: &mut Option<Choice>) {
-        text(ui, "Trim clip", 20.0, Weight::Bold, HEADER_PRIMARY);
+        text(ui, if self.soundboard { "Trim for the soundboard" } else { "Trim clip" }, 20.0, Weight::Bold, HEADER_PRIMARY);
         ui.add_space(4.0);
         let title = self.clip.name.clone().or_else(|| self.clip.saved.map(|s| when(s, today()))).unwrap_or_default();
         text(ui, format!("{title} · {}", clock(self.seconds)), 14.0, Weight::Regular, HEADER_SECONDARY);
+        if self.soundboard {
+            ui.add_space(8.0);
+            text(
+                ui,
+                format!(
+                    "This clip is {} long, but Discord's soundboard takes {} seconds at most. Pick the part to keep, then Make Discord-ready.",
+                    clock(self.seconds),
+                    library::SOUNDBOARD_MAX_SECONDS
+                ),
+                14.0,
+                Weight::Regular,
+                TEXT_NORMAL,
+            );
+        }
         ui.add_space(16.0);
 
         self.waveform(ui);
@@ -125,6 +164,29 @@ impl TrimDialog {
                     (format!("{} selected · {}", clock(selected), megabytes(bytes)), HEADER_SECONDARY)
                 };
                 text(ui, msg, 14.0, Weight::Semibold, color);
+            });
+        });
+
+        // The soundboard (#25): does the selection fit, and the one-click button.
+        ui.add_space(10.0);
+        let fits = selected <= library::SOUNDBOARD_MAX_SECONDS + 0.005;
+        ui.allocate_ui_with_layout(vec2(width, 32.0), Layout::left_to_right(Align::Center), |ui| {
+            let (msg, color) = if fits {
+                (format!("Fits Discord's soundboard ({} s max)", library::SOUNDBOARD_MAX_SECONDS), HEADER_SECONDARY)
+            } else {
+                (format!("Select {} seconds or less for Discord's soundboard", library::SOUNDBOARD_MAX_SECONDS), TEXT_MUTED)
+            };
+            text(ui, msg, 14.0, Weight::Regular, color);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let hint = if fits {
+                    "Mixes the tracks into one MP3 for the soundboard and replaces this clip; the original goes to the Recycle Bin"
+                } else {
+                    "The selection is too long for the soundboard"
+                };
+                let kind = if self.soundboard { ButtonKind::Success } else { ButtonKind::Primary };
+                if button_enabled(ui, "Make Discord-ready", kind, 32.0, fits).on_hover_text(hint).clicked() {
+                    *choice = Some(Choice::DiscordReady { start: self.start, end: self.end });
+                }
             });
         });
 
@@ -173,6 +235,7 @@ impl TrimDialog {
         let x_at = |f: f32| bars.left() + f * bars.width();
         let frac_at = |x: f32| ((x - bars.left()) / bars.width()).clamp(0.0, 1.0);
         let min_gap = (MIN_SECONDS / self.seconds).min(1.0);
+        let max_gap = self.max_gap();
 
         // Handles: drag to move.
         let mut hovered_handle = false;
@@ -187,9 +250,16 @@ impl TrimDialog {
             hovered_handle |= resp.hovered() || resp.dragged();
             if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.dragged()) {
                 let at = frac_at(p.x);
+                // Past the longest selection, the other handle follows.
                 match handle {
-                    Handle::Start => self.start = at.min(self.end - min_gap).max(0.0),
-                    Handle::End => self.end = at.max(self.start + min_gap).min(1.0),
+                    Handle::Start => {
+                        self.start = at.min(self.end - min_gap).max(0.0);
+                        self.end = self.end.min(self.start + max_gap);
+                    }
+                    Handle::End => {
+                        self.end = at.max(self.start + min_gap).min(1.0);
+                        self.start = self.start.max(self.end - max_gap);
+                    }
                 }
                 // The selection changed under the playhead: start over next time.
                 self.player = None;
