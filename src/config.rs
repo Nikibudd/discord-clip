@@ -23,6 +23,8 @@ pub struct Config {
     pub clipboard: bool,
     pub notifications: bool,
     pub check_updates: bool,
+    /// Window colours (#37).
+    pub theme: ThemeMode,
 }
 
 impl Default for Config {
@@ -39,6 +41,41 @@ impl Default for Config {
             clipboard: true,
             notifications: true,
             check_updates: true,
+            theme: ThemeMode::Discord,
+        }
+    }
+}
+
+/// Window colours (#37).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThemeMode {
+    /// The theme the user has in Discord, as far as it can be read.
+    #[default]
+    Discord,
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub const ALL: [ThemeMode; 3] = [ThemeMode::Discord, ThemeMode::Dark, ThemeMode::Light];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            ThemeMode::Discord => "discord",
+            ThemeMode::Dark => "dark",
+            ThemeMode::Light => "light",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<ThemeMode> {
+        ThemeMode::ALL.into_iter().find(|t| t.key().eq_ignore_ascii_case(key))
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeMode::Discord => "Follow Discord",
+            ThemeMode::Dark => "Dark",
+            ThemeMode::Light => "Light",
         }
     }
 }
@@ -150,6 +187,10 @@ impl Config {
             "clipboard" => self.clipboard = parse_bool(key, v)?,
             "notifications" => self.notifications = parse_bool(key, v)?,
             "check_updates" => self.check_updates = parse_bool(key, v)?,
+            "theme" => {
+                self.theme = ThemeMode::from_key(v)
+                    .with_context(|| format!("theme must be one of: {}", ThemeMode::ALL.map(|t| t.key()).join(", ")))?
+            }
             _ => bail!("unknown setting '{key}'"),
         }
         Ok(())
@@ -220,6 +261,9 @@ notifications = {}
 
 # Check GitHub for new versions (nothing is installed without asking)
 check_updates = {}
+
+# Window colours: discord (follow the theme you use in Discord), dark or light
+theme = {}
 ",
             self.hotkey,
             self.seconds,
@@ -231,7 +275,8 @@ check_updates = {}
             self.out_dir.display(),
             self.clipboard,
             self.notifications,
-            self.check_updates
+            self.check_updates,
+            self.theme.key()
         )
     }
 
@@ -276,6 +321,7 @@ mod tests {
         cfg.clipboard = false;
         cfg.notifications = false;
         cfg.check_updates = false;
+        cfg.theme = ThemeMode::Light;
         cfg.separate_tracks = false;
         cfg.format = crate::audio::Format::Mp3High;
         let (back, problems) = Config::parse(&cfg.to_text());

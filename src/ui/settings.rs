@@ -2,6 +2,7 @@
 
 use eframe::egui::{self, pos2, vec2, Align, CornerRadius, Frame, Layout, Margin, Sense, Ui};
 
+use super::follow::Follower;
 use super::keybind::KeybindRecorder;
 use super::theme::*;
 use super::widgets::*;
@@ -17,9 +18,9 @@ pub struct SettingsPage {
 }
 
 impl SettingsPage {
-    pub fn show(&mut self, ui: &mut Ui, snap: &Snapshot) {
+    pub fn show(&mut self, ui: &mut Ui, snap: &Snapshot, theme: &Follower) {
         let cfg = &snap.cfg;
-        text(ui, "Settings", 20.0, Weight::Bold, HEADER_PRIMARY);
+        text(ui, "Settings", 20.0, Weight::Bold, pal().header_primary);
         ui.add_space(20.0);
 
         // Hotkey
@@ -27,18 +28,18 @@ impl SettingsPage {
         self.keybind.show(ui, cfg.hotkey);
         ui.add_space(8.0);
         let hint = if let Some(h) = self.keybind.hint().map(str::to_string) {
-            (h, YELLOW)
+            (h, pal().yellow)
         } else if let Some(e) = snap.hotkey_error.clone().filter(|_| !self.keybind.is_recording()) {
-            (e, RED)
+            (e, pal().red)
         } else if !snap.hotkey_registered && !self.keybind.is_recording() {
-            (format!("{} is already used by another app. Pick a different combination.", cfg.hotkey), RED)
+            (format!("{} is already used by another app. Pick a different combination.", cfg.hotkey), pal().red)
         } else {
             (
                 format!(
                     "Saves the last {}s of Discord audio. Use Ctrl, Alt or Shift with a key, or an F-key on its own.",
                     cfg.seconds
                 ),
-                HEADER_SECONDARY,
+                pal().header_secondary,
             )
         };
         text(ui, hint.0, 14.0, Weight::Regular, hint.1);
@@ -49,7 +50,7 @@ impl SettingsPage {
         section_label(ui, "Recording");
         let mut secs = self.seconds_drag.unwrap_or(cfg.seconds as f32);
         row(ui, "Clip length", "How much audio each clip contains. Applies after a restart.", |ui| {
-            text(ui, format!("{} s", secs.round() as u32), 16.0, Weight::Semibold, HEADER_PRIMARY)
+            text(ui, format!("{} s", secs.round() as u32), 16.0, Weight::Semibold, pal().header_primary)
         });
         ui.add_space(8.0);
         let r = slider(ui, &mut secs, 5.0..=300.0, 5.0, true);
@@ -76,10 +77,10 @@ impl SettingsPage {
                 format!("≈ {size} per clip{on_disk}: over Discord's 10 MB upload limit without Nitro."),
                 14.0,
                 Weight::Regular,
-                YELLOW,
+                pal().yellow,
             );
         } else {
-            text(ui, format!("≈ {size} per clip{on_disk}."), 14.0, Weight::Regular, TEXT_MUTED);
+            text(ui, format!("≈ {size} per clip{on_disk}."), 14.0, Weight::Regular, pal().text_muted);
         }
 
         ui.add_space(24.0);
@@ -116,7 +117,7 @@ impl SettingsPage {
         ui.add_space(24.0);
         let mut gain = self.gain_drag.unwrap_or(cfg.mic_gain.min(4.0));
         row(ui, "Microphone volume", "How loud your voice is in clips, relative to everyone else.", |ui| {
-            text(ui, format!("{}%", (gain * 100.0).round() as u32), 16.0, Weight::Semibold, HEADER_PRIMARY)
+            text(ui, format!("{}%", (gain * 100.0).round() as u32), 16.0, Weight::Semibold, pal().header_primary)
         });
         ui.add_space(8.0);
         let r = slider(ui, &mut gain, 0.0..=4.0, 0.05, cfg.mic);
@@ -182,6 +183,11 @@ impl SettingsPage {
 
         divider(ui);
 
+        section_label(ui, "Appearance");
+        theme_picker(ui, &snap.cfg, theme);
+
+        divider(ui);
+
         // Advanced
         section_label(ui, "Advanced");
         text(
@@ -189,7 +195,7 @@ impl SettingsPage {
             "Settings are stored in config.ini. If you edit it by hand, reload it to apply your changes.",
             14.0,
             Weight::Regular,
-            HEADER_SECONDARY,
+            pal().header_secondary,
         );
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -218,14 +224,14 @@ fn folder_field(ui: &mut Ui, cfg: &Config) {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
         let path = cfg.out_dir.display().to_string();
         let painter = ui.painter();
-        painter.rect_filled(rect, CornerRadius::same(4), BG_TERTIARY);
+        painter.rect_filled(rect, CornerRadius::same(4), pal().bg_tertiary);
         let inner = rect.shrink2(vec2(10.0, 0.0));
-        let galley = painter.layout_no_wrap(path.clone(), font(15.0, Weight::Regular), TEXT_NORMAL);
+        let galley = painter.layout_no_wrap(path.clone(), font(15.0, Weight::Regular), pal().text_normal);
         // Too long: show the end of the path, which is the useful part.
         let x = if galley.size().x > inner.width() { inner.right() - galley.size().x } else { inner.left() };
         painter
             .with_clip_rect(inner)
-            .galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, TEXT_NORMAL);
+            .galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, pal().text_normal);
         resp.on_hover_text(path);
     });
 }
@@ -239,7 +245,7 @@ pub fn restart_bar(ui: &mut Ui) {
         .show(ui, |ui| {
             ui.set_max_width(ui.available_width().min(700.0));
             Frame::new()
-                .fill(BG_FLOATING)
+                .fill(pal().bg_floating)
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(Margin { left: 16, right: 10, top: 10, bottom: 10 })
                 .show(ui, |ui| {
@@ -255,7 +261,7 @@ pub fn restart_bar(ui: &mut Ui) {
                                 "Restart to apply your recording changes.",
                                 15.0,
                                 Weight::Semibold,
-                                TEXT_NORMAL,
+                                pal().text_normal,
                             );
                         });
                     });
@@ -278,14 +284,14 @@ fn size_text(bytes: u64) -> String {
 /// badges mark the smallest and largest and the ones without separate tracks.
 fn format_picker(ui: &mut Ui, cfg: &Config) {
     use crate::audio::Format;
-    text(ui, "Format", 16.0, Weight::Semibold, HEADER_PRIMARY);
+    text(ui, "Format", 16.0, Weight::Semibold, pal().header_primary);
     ui.add_space(4.0);
     text(
         ui,
         "What new clips are saved as. Opus and MP3 are small enough for long clips; FLAC and WAV keep every detail.",
         14.0,
         Weight::Regular,
-        HEADER_SECONDARY,
+        pal().header_secondary,
     );
     ui.add_space(8.0);
     let options: Vec<String> = Format::ALL
@@ -296,7 +302,7 @@ fn format_picker(ui: &mut Ui, cfg: &Config) {
         .iter()
         .map(|f| match f {
             Format::Opus => Some(("Exceptionally small", GREEN_BTN)),
-            Format::Mp3Low | Format::Mp3High => Some(("No dual track", GRAY_BTN)),
+            Format::Mp3Low | Format::Mp3High => Some(("No dual track", rgb(0x6D, 0x6F, 0x78))),
             Format::Wav => Some(("Exceptionally large", RED_BTN)),
             Format::Flac => None,
         })
@@ -314,12 +320,12 @@ fn format_picker(ui: &mut Ui, cfg: &Config) {
 /// a specific one (kept even while it's unplugged).
 fn mic_picker(ui: &mut Ui, snap: &Snapshot) {
     let cfg = &snap.cfg;
-    text(ui, "Microphone", 16.0, Weight::Semibold, HEADER_PRIMARY);
+    text(ui, "Microphone", 16.0, Weight::Semibold, pal().header_primary);
     ui.add_space(4.0);
     let (desc, color) = if snap.mic == "fallback" {
-        ("The selected microphone isn't connected, so your default communications microphone is recorded instead.", YELLOW)
+        ("The selected microphone isn't connected, so your default communications microphone is recorded instead.", pal().yellow)
     } else {
-        ("The mic you talk into on Discord. Applies after a restart.", HEADER_SECONDARY)
+        ("The mic you talk into on Discord. Applies after a restart.", pal().header_secondary)
     };
     text(ui, desc, 14.0, Weight::Regular, color);
     ui.add_space(8.0);
@@ -347,6 +353,27 @@ fn mic_picker(ui: &mut Ui, snap: &Snapshot) {
     if let Some(i) = picked {
         if Some(i) != selected {
             set(Command::SetMicDevice(ids[i].clone()));
+        }
+    }
+}
+
+/// Settings → Theme (#37): follow Discord, or always Dark / Light.
+fn theme_picker(ui: &mut Ui, cfg: &Config, follower: &Follower) {
+    use crate::config::ThemeMode;
+    text(ui, "Theme", 16.0, Weight::Semibold, pal().header_primary);
+    ui.add_space(4.0);
+    let desc = match cfg.theme {
+        ThemeMode::Discord => follower.describe(),
+        _ => "Follow Discord uses the theme you picked in Discord, including Nitro themes.".to_string(),
+    };
+    text(ui, desc, 14.0, Weight::Regular, pal().header_secondary);
+    ui.add_space(8.0);
+    let options: Vec<String> = ThemeMode::ALL.iter().map(|t| t.label().to_string()).collect();
+    let selected = ThemeMode::ALL.iter().position(|t| *t == cfg.theme);
+    let (_, picked) = dropdown(ui, "theme", &options, selected, true);
+    if let Some(i) = picked {
+        if Some(i) != selected {
+            set(Command::SetTheme(ThemeMode::ALL[i]));
         }
     }
 }

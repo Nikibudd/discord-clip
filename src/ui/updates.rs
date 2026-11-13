@@ -9,7 +9,7 @@ use crate::update::{State, CURRENT};
 
 /// `icon`: the app icon shown on the card.
 pub fn show(ui: &mut Ui, snap: &Snapshot, icon: &TextureHandle) {
-    text(ui, "Updates", 20.0, Weight::Bold, HEADER_PRIMARY);
+    text(ui, "Updates", 20.0, Weight::Bold, pal().header_primary);
     ui.add_space(20.0);
 
     if let Some(prev) = &snap.update.updated_from {
@@ -19,7 +19,7 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, icon: &TextureHandle) {
 
     // Card: app, version and what's going on.
     Frame::new()
-        .fill(BG_SECONDARY)
+        .fill(pal().bg_secondary)
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(16))
         .show(ui, |ui| {
@@ -31,10 +31,10 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, icon: &TextureHandle) {
                 ui.add_space(8.0);
                 ui.vertical(|ui| {
                     ui.add_space(4.0);
-                    text(ui, "Discord Clip", 16.0, Weight::Semibold, HEADER_PRIMARY);
+                    text(ui, "Discord Clip", 16.0, Weight::Semibold, pal().header_primary);
                     ui.add_space(2.0);
                     let kind = if snap.installed { "installed" } else { "portable" };
-                    text(ui, format!("Version {CURRENT} · {kind}"), 14.0, Weight::Regular, HEADER_SECONDARY);
+                    text(ui, format!("Version {CURRENT} · {kind}"), 14.0, Weight::Regular, pal().header_secondary);
                 });
             });
             ui.add_space(16.0);
@@ -46,7 +46,7 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, icon: &TextureHandle) {
                 .unwrap_or_default();
             match &snap.update.state {
                 State::Idle => {
-                    status_line(ui, None, "Not checked for updates yet.", TEXT_NORMAL);
+                    status_line(ui, None, "Not checked for updates yet.", pal().text_normal);
                     ui.add_space(12.0);
                     if button(ui, "Check for updates", ButtonKind::Primary).clicked() {
                         send(Command::CheckUpdates);
@@ -56,20 +56,20 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, icon: &TextureHandle) {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(16.0).color(BLURPLE));
                         ui.add_space(4.0);
-                        text(ui, "Checking for updates…", 15.0, Weight::Semibold, TEXT_NORMAL);
+                        text(ui, "Checking for updates…", 15.0, Weight::Semibold, pal().text_normal);
                     });
                 }
                 State::UpToDate => {
-                    status_line(ui, Some(GREEN), "You're up to date.", TEXT_NORMAL);
+                    status_line(ui, Some(pal().green), "You're up to date.", pal().text_normal);
                     ui.add_space(4.0);
-                    text(ui, checked, 14.0, Weight::Regular, TEXT_MUTED);
+                    text(ui, checked, 14.0, Weight::Regular, pal().text_muted);
                     ui.add_space(12.0);
                     if button(ui, "Check again", ButtonKind::Secondary).clicked() {
                         send(Command::CheckUpdates);
                     }
                 }
                 State::Available(m) => {
-                    status_line(ui, Some(BLURPLE), &format!("Version {} is available.", m.version), HEADER_PRIMARY);
+                    status_line(ui, Some(BLURPLE), &format!("Version {} is available.", m.version), pal().header_primary);
                     ui.add_space(4.0);
                     let released = m.published.get(..10).map(|d| format!("Released {d}. ")).unwrap_or_default();
                     let how = if snap.installed {
@@ -77,7 +77,7 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, icon: &TextureHandle) {
                     } else {
                         "This exe is replaced with the new version and restarted."
                     };
-                    text(ui, format!("{released}{how}"), 14.0, Weight::Regular, HEADER_SECONDARY);
+                    text(ui, format!("{released}{how}"), 14.0, Weight::Regular, pal().header_secondary);
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if button(ui, "Update now", ButtonKind::Success).clicked() {
@@ -89,7 +89,7 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, icon: &TextureHandle) {
                     });
                 }
                 State::Downloading { manifest, done, total } => {
-                    text(ui, format!("Downloading version {}…", manifest.version), 15.0, Weight::Semibold, TEXT_NORMAL);
+                    text(ui, format!("Downloading version {}…", manifest.version), 15.0, Weight::Semibold, pal().text_normal);
                     ui.add_space(10.0);
                     let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
                     progress_bar(ui, frac);
@@ -99,21 +99,21 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, icon: &TextureHandle) {
                         format!("{:.1} of {:.1} MB", *done as f32 / 1e6, *total as f32 / 1e6),
                         14.0,
                         Weight::Regular,
-                        TEXT_MUTED,
+                        pal().text_muted,
                     );
                 }
                 State::Ready { manifest, .. } => {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(16.0).color(GREEN));
+                        ui.add(egui::Spinner::new().size(16.0).color(pal().green));
                         ui.add_space(4.0);
-                        text(ui, format!("Installing version {}…", manifest.version), 15.0, Weight::Semibold, TEXT_NORMAL);
+                        text(ui, format!("Installing version {}…", manifest.version), 15.0, Weight::Semibold, pal().text_normal);
                     });
                 }
                 State::Failed { error, manifest } => {
                     let what = if manifest.is_some() { "Couldn't install the update." } else { "Couldn't check for updates." };
-                    status_line(ui, Some(RED), what, HEADER_PRIMARY);
+                    status_line(ui, Some(pal().red), what, pal().header_primary);
                     ui.add_space(4.0);
-                    text(ui, error, 14.0, Weight::Regular, HEADER_SECONDARY);
+                    text(ui, error, 14.0, Weight::Regular, pal().header_secondary);
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if manifest.is_some() {
@@ -151,8 +151,8 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, icon: &TextureHandle) {
 /// opens on this page when the update was started from here).
 fn updated_banner(ui: &mut Ui, prev: &str) {
     Frame::new()
-        .fill(mix(BG_SECONDARY, GREEN, 0.15))
-        .stroke(egui::Stroke::new(1.0, mix(BG_SECONDARY, GREEN, 0.5)))
+        .fill(mix(pal().bg_secondary, pal().green, 0.15))
+        .stroke(egui::Stroke::new(1.0, mix(pal().bg_secondary, pal().green, 0.5)))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::symmetric(16, 12))
         .show(ui, |ui| {
@@ -166,7 +166,7 @@ fn updated_banner(ui: &mut Ui, prev: &str) {
                     }
                     ui.add_space(8.0);
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        status_line(ui, Some(GREEN), &format!("Updated from {prev} to {CURRENT}."), HEADER_PRIMARY);
+                        status_line(ui, Some(pal().green), &format!("Updated from {prev} to {CURRENT}."), pal().header_primary);
                     });
                 },
             );

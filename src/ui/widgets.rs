@@ -11,14 +11,14 @@ pub fn text(ui: &mut Ui, s: impl Into<String>, size: f32, weight: Weight, color:
 }
 
 pub fn section_label(ui: &mut Ui, s: &str) {
-    text(ui, s.to_uppercase(), 12.0, Weight::Bold, HEADER_SECONDARY);
+    text(ui, s.to_uppercase(), 12.0, Weight::Bold, pal().header_secondary);
     ui.add_space(8.0);
 }
 
 pub fn divider(ui: &mut Ui) {
     ui.add_space(24.0);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, DIVIDER);
+    ui.painter().rect_filled(rect, 0.0, pal().divider);
     ui.add_space(24.0);
 }
 
@@ -41,19 +41,19 @@ pub fn button_sized(ui: &mut Ui, label: &str, kind: ButtonKind, height: f32) -> 
 /// A button that can be greyed out: dimmed, and clicks do nothing (hover
 /// text still shows, to say why).
 pub fn button_enabled(ui: &mut Ui, label: &str, kind: ButtonKind, height: f32, enabled: bool) -> egui::Response {
-    let text_color = if enabled { Color32::WHITE } else { TEXT_MUTED };
+    let text_color = if enabled { pal().on_button(matches!(kind, ButtonKind::Secondary)) } else { pal().text_muted };
     let galley = ui.painter().layout_no_wrap(label.to_string(), font(14.0, Weight::Semibold), text_color);
     let size = vec2((galley.size().x + 32.0).max(60.0), height);
     if !enabled {
         let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-        ui.painter().rect_filled(rect, CornerRadius::same(4), GRAY_BTN.gamma_multiply(0.6));
+        ui.painter().rect_filled(rect, CornerRadius::same(4), pal().gray_btn.gamma_multiply(0.6));
         ui.painter().galley(rect.center() - galley.size() / 2.0, galley, text_color);
         return resp;
     }
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let (base, hover, active) = match kind {
         ButtonKind::Primary => (BLURPLE, BLURPLE_HOVER, BLURPLE_ACTIVE),
-        ButtonKind::Secondary => (GRAY_BTN, GRAY_BTN_HOVER, GRAY_BTN_ACTIVE),
+        ButtonKind::Secondary => (pal().gray_btn, pal().gray_btn_hover, pal().gray_btn_active),
         ButtonKind::Success => (GREEN_BTN, GREEN_BTN_HOVER, GREEN_BTN_ACTIVE),
         ButtonKind::Danger => (RED_BTN, RED_BTN_HOVER, RED_BTN_ACTIVE),
     };
@@ -66,7 +66,7 @@ pub fn button_enabled(ui: &mut Ui, label: &str, kind: ButtonKind, height: f32, e
     };
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(4), fill);
-    painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    painter.galley(rect.center() - galley.size() / 2.0, galley, text_color);
     resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
@@ -80,13 +80,13 @@ pub fn toggle_enabled(ui: &mut Ui, on: bool, enabled: bool) -> egui::Response {
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 24.0), sense);
     if !enabled {
-        ui.painter().rect_filled(rect, CornerRadius::same(12), GRAY_BTN);
+        ui.painter().rect_filled(rect, CornerRadius::same(12), pal().gray_btn);
         let c = pos2(rect.left() + 12.0, rect.center().y);
-        ui.painter().circle_filled(c, 9.0, TEXT_MUTED);
+        ui.painter().circle_filled(c, 9.0, pal().text_muted);
         return resp;
     }
     let t = ui.ctx().animate_bool_responsive(resp.id, on);
-    let bg = mix(TOGGLE_OFF, GREEN, t);
+    let bg = mix(pal().toggle_off, pal().green, t);
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(12), bg);
     let r = 9.0;
@@ -111,10 +111,10 @@ pub fn row<R>(ui: &mut Ui, title: &str, desc: &str, control: impl FnOnce(&mut Ui
         let r = control(ui);
         ui.add_space(24.0);
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
-            text(ui, title, 16.0, Weight::Semibold, HEADER_PRIMARY);
+            text(ui, title, 16.0, Weight::Semibold, pal().header_primary);
             if !desc.is_empty() {
                 ui.add_space(4.0);
-                text(ui, desc, 14.0, Weight::Regular, HEADER_SECONDARY);
+                text(ui, desc, 14.0, Weight::Regular, pal().header_secondary);
             }
         });
         r
@@ -140,12 +140,12 @@ pub fn slider(ui: &mut Ui, value: &mut f32, range: RangeInclusive<f32>, step: f3
     let t = (*value - lo) / (hi - lo);
     let x = track.left() + t * track.width();
     let painter = ui.painter();
-    painter.rect_filled(track, CornerRadius::same(4), GRAY_BTN);
+    painter.rect_filled(track, CornerRadius::same(4), pal().gray_btn);
     let fill = Rect::from_min_max(track.min, pos2(x, track.max.y));
-    painter.rect_filled(fill, CornerRadius::same(4), if enabled { BLURPLE } else { TOGGLE_OFF });
+    painter.rect_filled(fill, CornerRadius::same(4), if enabled { BLURPLE } else { pal().toggle_off });
     let grab = Rect::from_center_size(pos2(x, track.center().y), vec2(10.0, 24.0));
     painter.rect_filled(grab.translate(vec2(0.0, 1.0)), CornerRadius::same(3), Color32::from_black_alpha(80));
-    painter.rect_filled(grab, CornerRadius::same(3), if enabled { Color32::WHITE } else { HEADER_SECONDARY });
+    painter.rect_filled(grab, CornerRadius::same(3), if enabled { Color32::WHITE } else { pal().header_secondary });
     if enabled {
         resp.on_hover_cursor(CursorIcon::PointingHand)
     } else {
@@ -168,7 +168,7 @@ pub fn status_line(ui: &mut Ui, dot: Option<Color32>, msg: &str, color: Color32)
 pub fn progress_bar(ui: &mut Ui, frac: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(4), BG_TERTIARY);
+    painter.rect_filled(rect, CornerRadius::same(4), pal().bg_tertiary);
     let fill = Rect::from_min_max(rect.min, pos2(rect.left() + rect.width() * frac.clamp(0.0, 1.0), rect.max.y));
     painter.rect_filled(fill, CornerRadius::same(4), BLURPLE);
 }
@@ -223,14 +223,14 @@ pub fn dropdown_with_badges(
     }
 
     let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(4), BG_TERTIARY);
+    painter.rect_filled(rect, CornerRadius::same(4), pal().bg_tertiary);
     if open {
         painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, BLURPLE), egui::StrokeKind::Inside);
     } else if resp.hovered() {
-        painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, BG_FLOATING), egui::StrokeKind::Inside);
+        painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, pal().bg_floating), egui::StrokeKind::Inside);
     }
     let label = selected.and_then(|i| options.get(i)).map(String::as_str).unwrap_or("");
-    let color = if enabled { TEXT_NORMAL } else { TEXT_MUTED };
+    let color = if enabled { pal().text_normal } else { pal().text_muted };
     let mut text_rect = Rect::from_min_max(rect.min + vec2(12.0, 0.0), rect.max - vec2(36.0, 0.0));
     if let Some(b) = selected.and_then(badge_of) {
         let left = badge(painter, b, pos2(text_rect.right(), rect.center().y));
@@ -258,8 +258,8 @@ pub fn dropdown_with_badges(
             .fixed_pos(at)
             .show(ui.ctx(), |ui| {
                 egui::Frame::new()
-                    .fill(BG_SECONDARY_ALT)
-                    .stroke(Stroke::new(1.0, BG_FLOATING))
+                    .fill(pal().bg_secondary_alt)
+                    .stroke(Stroke::new(1.0, pal().bg_floating))
                     .corner_radius(CornerRadius::same(4))
                     .inner_margin(egui::Margin::same(4))
                     .show(ui, |ui| {
@@ -269,14 +269,14 @@ pub fn dropdown_with_badges(
                             let (r, row) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
                             let is_selected = selected == Some(i);
                             let fill = if row.hovered() {
-                                BG_HOVER
+                                pal().bg_hover
                             } else if is_selected {
-                                BG_SELECTED
+                                pal().bg_selected
                             } else {
                                 Color32::TRANSPARENT
                             };
                             ui.painter().rect_filled(r, CornerRadius::same(3), fill);
-                            let color = if is_selected || row.hovered() { Color32::WHITE } else { TEXT_NORMAL };
+                            let color = if is_selected || row.hovered() { pal().header_primary } else { pal().text_normal };
                             let mut text_right = r.right() - 34.0;
                             if let Some(b) = badge_of(i) {
                                 text_right = badge(ui.painter(), b, pos2(text_right, r.center().y)) - 8.0;

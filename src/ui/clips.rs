@@ -186,7 +186,7 @@ impl ClipsPage {
             }
             ui.add_space(16.0);
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                text(ui, "Clips", 20.0, Weight::Bold, HEADER_PRIMARY);
+                text(ui, "Clips", 20.0, Weight::Bold, pal().header_primary);
                 ui.add_space(4.0);
                 let total: u64 = all.iter().map(|c| c.size).sum();
                 let dir = snap.cfg.out_dir.display();
@@ -201,7 +201,7 @@ impl ClipsPage {
                     1 => format!("1 clip{hidden_note} · {} · {dir}", megabytes(total)),
                     n => format!("{n} clips{hidden_note} · {} · {dir}", megabytes(total)),
                 };
-                text(ui, summary, 14.0, Weight::Regular, HEADER_SECONDARY);
+                text(ui, summary, 14.0, Weight::Regular, pal().header_secondary);
             });
         });
         ui.add_space(16.0);
@@ -244,7 +244,7 @@ impl ClipsPage {
                 n => msg.push_str(&format!(" {n} {hidden_kind} clips match.")),
             }
             if hidden_matches == 0 {
-                text(ui, msg, 15.0, Weight::Regular, HEADER_SECONDARY);
+                text(ui, msg, 15.0, Weight::Regular, pal().header_secondary);
             } else if notice(ui, &msg, "Show all clips") {
                 self.filter = Filter::All;
             }
@@ -613,11 +613,11 @@ impl ClipsPage {
                 ui.set_max_width(screen.width() - 280.0);
                 ui.multiply_opacity(alpha);
                 Frame::new()
-                    .fill(BG_FLOATING)
+                    .fill(pal().bg_floating)
                     .corner_radius(CornerRadius::same(6))
                     .inner_margin(Margin::symmetric(14, 10))
                     .show(ui, |ui| {
-                        text(ui, msg.as_str(), 14.0, Weight::Semibold, TEXT_NORMAL);
+                        text(ui, msg.as_str(), 14.0, Weight::Semibold, pal().text_normal);
                     });
             });
     }
@@ -637,12 +637,12 @@ fn spawn_worker(ctx: egui::Context, analyses: Analyses) -> Sender<(PathBuf, Syst
 
 fn empty_state(ui: &mut Ui, snap: &Snapshot) {
     Frame::new()
-        .fill(BG_SECONDARY)
+        .fill(pal().bg_secondary)
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(24))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            text(ui, "No clips yet", 16.0, Weight::Semibold, HEADER_PRIMARY);
+            text(ui, "No clips yet", 16.0, Weight::Semibold, pal().header_primary);
             ui.add_space(6.0);
             text(
                 ui,
@@ -652,7 +652,7 @@ fn empty_state(ui: &mut Ui, snap: &Snapshot) {
                 ),
                 14.0,
                 Weight::Regular,
-                HEADER_SECONDARY,
+                pal().header_secondary,
             );
         });
 }
@@ -662,7 +662,7 @@ fn notice(ui: &mut Ui, msg: &str, button_label: &str) -> bool {
     let width = ui.available_width();
     ui.allocate_ui_with_layout(vec2(width, 32.0), Layout::left_to_right(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
-        text(ui, msg, 15.0, Weight::Regular, HEADER_SECONDARY);
+        text(ui, msg, 15.0, Weight::Regular, pal().header_secondary);
         button(ui, button_label, ButtonKind::Secondary).clicked()
     })
     .inner
@@ -691,7 +691,7 @@ fn tile(
     let Card { view, menu_open, custom_mix, uploaded } = card_state;
     let id = ui.make_persistent_id(("clip", &clip.path));
     let card = ui.interact(rect, id, Sense::hover());
-    let fill = if card.hovered() { mix(BG_SECONDARY, BG_HOVER, 0.6) } else { BG_SECONDARY };
+    let fill = if card.hovered() { mix(pal().bg_secondary, pal().bg_hover, 0.6) } else { pal().bg_secondary };
     ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
     let inner = rect.shrink(12.0);
     let mut action = None;
@@ -706,7 +706,7 @@ fn tile(
 
     // Player: play/pause button and the waveform to scrub on.
     let panel = Rect::from_min_size(inner.min, vec2(inner.width(), 64.0));
-    ui.painter().rect_filled(panel, CornerRadius::same(6), BG_TERTIARY);
+    ui.painter().rect_filled(panel, CornerRadius::same(6), pal().bg_tertiary);
 
     let center = pos2(panel.left() + 30.0, panel.center().y);
     let play = ui
@@ -752,11 +752,11 @@ fn tile(
         let bar = Rect::from_center_size(pos2(x, bars_area.center().y), vec2(bar_w, h));
         let done = head.is_some_and(|f| (i as f32 + 0.5) / peaks.len() as f32 <= f);
         let color = if done {
-            Color32::WHITE
+            pal().header_primary
         } else if analysis.is_some() {
-            TEXT_MUTED
+            pal().text_muted
         } else {
-            GRAY_BTN
+            pal().gray_btn
         };
         painter.rect_filled(bar, CornerRadius::same(1), color);
     }
@@ -764,14 +764,14 @@ fn tile(
     // Hover: a faint line and the time under the mouse.
     if let Some(f) = hover_at {
         let x = bars_area.left() + f * bars_area.width();
-        painter.line_segment([pos2(x, panel.top() + 6.0), pos2(x, panel.bottom() - 6.0)], Stroke::new(1.0, HEADER_SECONDARY.gamma_multiply(0.6)));
+        painter.line_segment([pos2(x, panel.top() + 6.0), pos2(x, panel.bottom() - 6.0)], Stroke::new(1.0, pal().header_secondary.gamma_multiply(0.6)));
         time_bubble(ui, x, panel, &clock_precise(f * seconds));
     }
     // Playhead: a line with a round handle.
     if let Some(f) = head {
         let x = bars_area.left() + f * bars_area.width();
-        painter.line_segment([pos2(x, panel.top() + 4.0), pos2(x, panel.bottom() - 4.0)], Stroke::new(2.0, Color32::WHITE));
-        painter.circle_filled(pos2(x, panel.top() + 6.0), 4.5, Color32::WHITE);
+        painter.line_segment([pos2(x, panel.top() + 4.0), pos2(x, panel.bottom() - 4.0)], Stroke::new(2.0, pal().header_primary));
+        painter.circle_filled(pos2(x, panel.top() + 6.0), 4.5, pal().header_primary);
         if drag_at.is_some() {
             time_bubble(ui, x, panel, &clock_precise(f * seconds));
         }
@@ -797,7 +797,7 @@ fn tile(
                 action = Some(Action::StartRename);
             }
             // One line, ending in "…" when it doesn't fit (e.g. long names).
-            let mut job = egui::text::LayoutJob::simple_singleline(title, font(15.0, Weight::Semibold), HEADER_PRIMARY);
+            let mut job = egui::text::LayoutJob::simple_singleline(title, font(15.0, Weight::Semibold), pal().header_primary);
             job.wrap = egui::text::TextWrapping {
                 max_width: title_rect.width() - 20.0,
                 max_rows: 1,
@@ -806,9 +806,9 @@ fn tile(
             };
             let galley = ui.painter().layout_job(job);
             let end = title_rect.left() + galley.size().x;
-            ui.painter().galley(title_rect.left_top(), galley, HEADER_PRIMARY);
+            ui.painter().galley(title_rect.left_top(), galley, pal().header_primary);
             if resp.hovered() {
-                pencil(ui.painter(), pos2(end + 11.0, title_rect.top() + 10.0), HEADER_SECONDARY);
+                pencil(ui.painter(), pos2(end + 11.0, title_rect.top() + 10.0), pal().header_secondary);
             }
         }
     }
@@ -818,7 +818,7 @@ fn tile(
         Some(f) => format!("{} / {}", clock(f * seconds), clock(seconds)),
         None => clock(seconds),
     };
-    painter.text(pos2(inner.right(), title_y), Align2::RIGHT_TOP, length, font(14.0, Weight::Semibold), HEADER_SECONDARY);
+    painter.text(pos2(inner.right(), title_y), Align2::RIGHT_TOP, length, font(14.0, Weight::Semibold), pal().header_secondary);
     // Named clips show their date here instead.
     let mut detail = match (&clip.name, &date) {
         (Some(_), Some(d)) => format!("{d} · {}", megabytes(clip.size)),
@@ -834,7 +834,7 @@ fn tile(
     if uploaded {
         detail.push_str(" · Uploaded");
     }
-    painter.text(pos2(inner.left(), title_y + 23.0), Align2::LEFT_TOP, detail, font(13.0, Weight::Regular), TEXT_MUTED);
+    painter.text(pos2(inner.left(), title_y + 23.0), Align2::LEFT_TOP, detail, font(13.0, Weight::Regular), pal().text_muted);
 
     // Buttons.
     let buttons = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 30.0), inner.max);
@@ -879,15 +879,15 @@ fn more_button(ui: &mut Ui, open: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
     let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("More");
     let fill = if open || resp.is_pointer_button_down_on() {
-        GRAY_BTN_ACTIVE
+        pal().gray_btn_active
     } else if resp.hovered() {
-        GRAY_BTN_HOVER
+        pal().gray_btn_hover
     } else {
-        GRAY_BTN
+        pal().gray_btn
     };
     ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
     for dx in [-6.0, 0.0, 6.0] {
-        ui.painter().circle_filled(rect.center() + vec2(dx, 0.0), 2.0, Color32::WHITE);
+        ui.painter().circle_filled(rect.center() + vec2(dx, 0.0), 2.0, pal().header_primary);
     }
     resp
 }
@@ -922,7 +922,7 @@ fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool, u
         .fixed_pos(button.rect.right_bottom() + vec2(0.0, 4.0))
         .show(ui.ctx(), |ui| {
             Frame::new()
-                .fill(BG_FLOATING)
+                .fill(pal().bg_floating)
                 .corner_radius(CornerRadius::same(4))
                 .inner_margin(Margin::same(6))
                 .show(ui, |ui| {
@@ -933,7 +933,7 @@ fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool, u
                             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
                             ui.painter().line_segment(
                                 [pos2(r.left() + 4.0, r.center().y), pos2(r.right() - 4.0, r.center().y)],
-                                Stroke::new(1.0, DIVIDER),
+                                Stroke::new(1.0, pal().divider),
                             );
                         }
                         for (label, make) in group {
@@ -945,8 +945,8 @@ fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool, u
                             }
                             let color = match (resp.hovered(), danger) {
                                 (true, _) => Color32::WHITE,
-                                (false, true) => RED,
-                                (false, false) => TEXT_NORMAL,
+                                (false, true) => pal().red,
+                                (false, false) => pal().text_normal,
                             };
                             ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, *label, font(14.0, Weight::Semibold), color);
                             if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
@@ -965,14 +965,14 @@ fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool, u
 /// Inline name editor over a card's title. Enter or clicking away saves,
 /// Esc cancels.
 fn name_editor(ui: &mut Ui, rect: Rect, text: &mut String, id: egui::Id) -> Option<Action> {
-    ui.painter().rect_filled(rect, CornerRadius::same(4), BG_TERTIARY);
+    ui.painter().rect_filled(rect, CornerRadius::same(4), pal().bg_tertiary);
     ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, BLURPLE), egui::StrokeKind::Inside);
     let edit = egui::TextEdit::singleline(text)
         .id(id)
         .frame(Frame::NONE)
         .font(font(15.0, Weight::Semibold))
-        .text_color(HEADER_PRIMARY)
-        .hint_text(egui::RichText::new("Name this clip").color(TEXT_MUTED))
+        .text_color(pal().header_primary)
+        .hint_text(egui::RichText::new("Name this clip").color(pal().text_muted))
         .desired_width(rect.width() - 12.0);
     let resp = ui.put(rect.shrink2(vec2(6.0, 2.0)), edit);
     if resp.lost_focus() {
@@ -1002,16 +1002,16 @@ fn pencil(painter: &Painter, c: egui::Pos2, color: Color32) {
 /// 40 px tall, like the filter dropdown next to it.
 fn search_box(ui: &mut Ui, query: &mut String) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width().min(360.0), 40.0), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(4), BG_TERTIARY);
+    ui.painter().rect_filled(rect, CornerRadius::same(4), pal().bg_tertiary);
     // Magnifier.
     let c = pos2(rect.right() - 18.0, rect.center().y);
     if query.is_empty() {
-        ui.painter().circle_stroke(c + vec2(-1.5, -1.5), 5.0, Stroke::new(1.6, TEXT_MUTED));
-        ui.painter().line_segment([c + vec2(2.0, 2.0), c + vec2(6.0, 6.0)], Stroke::new(1.8, TEXT_MUTED));
+        ui.painter().circle_stroke(c + vec2(-1.5, -1.5), 5.0, Stroke::new(1.6, pal().text_muted));
+        ui.painter().line_segment([c + vec2(2.0, 2.0), c + vec2(6.0, 6.0)], Stroke::new(1.8, pal().text_muted));
     } else {
         // Clear (x).
         let clear = ui.interact(Rect::from_center_size(c, vec2(22.0, 22.0)), ui.make_persistent_id("search-clear"), Sense::click());
-        let col = if clear.hovered() { HEADER_PRIMARY } else { TEXT_MUTED };
+        let col = if clear.hovered() { pal().header_primary } else { pal().text_muted };
         let s = Stroke::new(1.8, col);
         ui.painter().line_segment([c + vec2(-4.5, -4.5), c + vec2(4.5, 4.5)], s);
         ui.painter().line_segment([c + vec2(4.5, -4.5), c + vec2(-4.5, 4.5)], s);
@@ -1023,8 +1023,8 @@ fn search_box(ui: &mut Ui, query: &mut String) {
         .id(ui.make_persistent_id("clip-search"))
         .frame(Frame::NONE)
         .font(font(15.0, Weight::Regular))
-        .text_color(TEXT_NORMAL)
-        .hint_text(egui::RichText::new("Search clips").color(TEXT_MUTED))
+        .text_color(pal().text_normal)
+        .hint_text(egui::RichText::new("Search clips").color(pal().text_muted))
         .desired_width(rect.width() - 44.0);
     let resp = ui.put(Rect::from_min_max(rect.min + vec2(10.0, 10.0), rect.max - vec2(34.0, 10.0)), edit);
     if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1078,13 +1078,13 @@ pub(super) fn play_button(ui: &Ui, center: egui::Pos2, playing: bool, hovered: b
 /// layer so the scroll area never clips it.
 fn time_bubble(ui: &Ui, x: f32, panel: Rect, label: &str) {
     let painter: Painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("scrub-time")));
-    let galley = painter.layout_no_wrap(label.to_string(), font(12.0, Weight::Bold), Color32::WHITE);
+    let galley = painter.layout_no_wrap(label.to_string(), font(12.0, Weight::Bold), pal().header_primary);
     let size = galley.size() + vec2(10.0, 4.0);
     // min/max instead of clamp: clamp panics if the panel is narrower than the label.
     let left = (x - size.x / 2.0).min(panel.right() - size.x - 2.0).max(panel.left() + 2.0);
     let rect = Rect::from_min_size(pos2(left, panel.top() - size.y - 4.0), size);
-    painter.rect_filled(rect, CornerRadius::same(4), BG_FLOATING);
-    painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    painter.rect_filled(rect, CornerRadius::same(4), pal().bg_floating);
+    painter.galley(rect.center() - galley.size() / 2.0, galley, pal().header_primary);
 }
 
 // ---------------------------------------------------------------------------

@@ -13,13 +13,13 @@ pub fn show(ui: &mut Ui, page: &mut Page, snap: &Snapshot, icons: &Icons) {
         .exact_size(52.0)
         .resizable(false)
         .show_separator_line(false)
-        .frame(Frame::new().fill(BG_SECONDARY_ALT).inner_margin(Margin::symmetric(8, 0)))
+        .frame(Frame::new().fill(pal().bg_secondary_alt).inner_margin(Margin::symmetric(8, 0)))
         .show(ui, |ui| status_panel(ui, snap, icons));
 
     Frame::new().inner_margin(Margin { left: 10, right: 10, top: 24, bottom: 8 }).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.add_space(10.0);
-            text(ui, "DISCORD CLIP", 12.0, Weight::Bold, TEXT_MUTED);
+            text(ui, "DISCORD CLIP", 12.0, Weight::Bold, pal().text_muted);
         });
         ui.add_space(8.0);
         for p in Page::ALL {
@@ -37,11 +37,11 @@ pub fn show(ui: &mut Ui, page: &mut Page, snap: &Snapshot, icons: &Icons) {
 fn nav_item(ui: &mut Ui, label: &str, selected: bool, badge: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
     let (fill, color) = if selected {
-        (BG_SELECTED, Color32::WHITE)
+        (pal().bg_selected, pal().header_primary)
     } else if resp.hovered() {
-        (BG_HOVER, TEXT_NORMAL)
+        (pal().bg_hover, pal().text_normal)
     } else {
-        (Color32::TRANSPARENT, HEADER_SECONDARY)
+        (Color32::TRANSPARENT, pal().header_secondary)
     };
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(4), fill);
@@ -54,7 +54,7 @@ fn nav_item(ui: &mut Ui, label: &str, selected: bool, badge: bool) -> egui::Resp
     );
     if badge {
         let pill = Rect::from_center_size(pos2(rect.right() - 18.0, rect.center().y), vec2(16.0, 16.0));
-        painter.rect_filled(pill, CornerRadius::same(8), RED);
+        painter.rect_filled(pill, CornerRadius::same(8), pal().red);
         painter.text(pill.center(), Align2::CENTER_CENTER, "1", font(12.0, Weight::Bold), Color32::WHITE);
     }
     resp.on_hover_cursor(CursorIcon::PointingHand)
@@ -63,11 +63,11 @@ fn nav_item(ui: &mut Ui, label: &str, selected: bool, badge: bool) -> egui::Resp
 /// Like Discord's user panel: avatar with a status dot, name and status.
 fn status_panel(ui: &mut Ui, snap: &Snapshot, icons: &Icons) {
     let (status, dot) = if snap.discord_active {
-        ("Capturing Discord", GREEN)
+        ("Capturing Discord", pal().green)
     } else if snap.discord.starts_with("error") {
-        ("Capture error", RED)
+        ("Capture error", pal().red)
     } else {
-        ("Waiting for Discord", TOGGLE_OFF)
+        ("Waiting for Discord", pal().toggle_off)
     };
     let width = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 52.0), Sense::hover());
@@ -76,10 +76,10 @@ fn status_panel(ui: &mut Ui, snap: &Snapshot, icons: &Icons) {
     let tex = if snap.discord_active { &icons.active } else { &icons.idle };
     painter.image(tex.id(), avatar, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     let dot_c = avatar.right_bottom() - vec2(4.0, 4.0);
-    painter.circle_filled(dot_c, 7.0, BG_SECONDARY_ALT);
+    painter.circle_filled(dot_c, 7.0, pal().bg_secondary_alt);
     painter.circle_filled(dot_c, 5.0, dot);
     let x = avatar.right() + 8.0;
-    painter.text(pos2(x, rect.center().y - 1.0), Align2::LEFT_BOTTOM, "Discord Clip", font(14.0, Weight::Semibold), HEADER_PRIMARY);
+    painter.text(pos2(x, rect.center().y - 1.0), Align2::LEFT_BOTTOM, "Discord Clip", font(14.0, Weight::Semibold), pal().header_primary);
     let mic = match snap.mic.as_str() {
         "on" => "mic on",
         "off" => "mic off",
@@ -91,7 +91,7 @@ fn status_panel(ui: &mut Ui, snap: &Snapshot, icons: &Icons) {
         Align2::LEFT_TOP,
         format!("{status} · {mic}"),
         font(12.0, Weight::Regular),
-        HEADER_SECONDARY,
+        pal().header_secondary,
     );
     resp.on_hover_text(&snap.discord);
 }
