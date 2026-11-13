@@ -35,8 +35,21 @@ pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind) -> egui::Response {
 }
 
 pub fn button_sized(ui: &mut Ui, label: &str, kind: ButtonKind, height: f32) -> egui::Response {
-    let galley = ui.painter().layout_no_wrap(label.to_string(), font(14.0, Weight::Semibold), Color32::WHITE);
+    button_enabled(ui, label, kind, height, true)
+}
+
+/// A button that can be greyed out: dimmed, and clicks do nothing (hover
+/// text still shows, to say why).
+pub fn button_enabled(ui: &mut Ui, label: &str, kind: ButtonKind, height: f32, enabled: bool) -> egui::Response {
+    let text_color = if enabled { Color32::WHITE } else { TEXT_MUTED };
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font(14.0, Weight::Semibold), text_color);
     let size = vec2((galley.size().x + 32.0).max(60.0), height);
+    if !enabled {
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+        ui.painter().rect_filled(rect, CornerRadius::same(4), GRAY_BTN.gamma_multiply(0.6));
+        ui.painter().galley(rect.center() - galley.size() / 2.0, galley, text_color);
+        return resp;
+    }
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let (base, hover, active) = match kind {
         ButtonKind::Primary => (BLURPLE, BLURPLE_HOVER, BLURPLE_ACTIVE),

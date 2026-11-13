@@ -82,6 +82,8 @@ enum Action {
     CloseMenu,
     /// Open the Trim dialog.
     Trim,
+    /// Turn the clip into a soundboard MP3 in its place (#25).
+    DiscordReady,
     /// Open the Volume panel (clips with separate tracks).
     OpenVolume,
     /// Moved a volume slider; `true` once let go (then it's stored).
@@ -340,6 +342,23 @@ impl ClipsPage {
                 let v = self.volumes_of(&clip.path);
                 super::trim::TrimDialog::open(clip, v).map(|d| self.trim = Some(d))
             }
+            Action::DiscordReady => match self.make_discord_ready(&clip.path, 0.0, 1.0) {
+                Ok(Some(msg)) => {
+                    self.toast = Some((msg, Instant::now()));
+                    Ok(())
+                }
+                // Too long: pick the part to keep in the Trim dialog.
+                Ok(None) => {
+                    self.stop();
+                    let v = self.volumes_of(&clip.path);
+                    super::trim::TrimDialog::open_for_soundboard(clip, v).map(|d| self.trim = Some(d))
+                }
+                Err(e) => {
+                    crate::log!("making {} Discord-ready failed: {e:#}", clip.path.display());
+                    self.toast = Some((format!("Couldn't make it Discord-ready: {e:#}"), Instant::now()));
+                    Ok(())
+                }
+            },
             Action::CancelRename => {
                 self.renaming = None;
                 Ok(())
@@ -395,6 +414,31 @@ impl ClipsPage {
         }
     }
 
+    /// Replaces the clip with its Discord-ready version (#25). Returns the
+    /// message to show, or `None` when the selection is too long (nothing
+    /// changed).
+    fn make_discord_ready(&mut self, path: &Path, start: f32, end: f32) -> anyhow::Result<Option<String>> {
+        let v = self.volumes_of(path);
+        if self.player.as_ref().is_some_and(|p| p.path() == path) {
+            self.stop();
+        }
+        let new = match library::make_discord_ready(path, start, end, v)? {
+            library::DiscordReady::TooLong(_) => return Ok(None),
+            library::DiscordReady::Done(new) => new,
+        };
+        crate::log!("made {} Discord-ready: {}", path.display(), new.display());
+        // The mix is in the file now: forget the clip's volumes.
+        if let Err(e) = volumes::set(path, Volumes::default()) {
+            crate::log!("clearing the volumes of {} failed: {e:#}", path.display());
+        }
+        self.volumes = volumes::load();
+        if self.volume_panel.as_ref().is_some_and(|(p, _)| p == path) {
+            self.volume_panel = None;
+        }
+        self.last_scan = None; // show the new file now
+        Ok(Some(format!("Discord-ready: {}. The original is in the Recycle Bin.", file_name(&new))))
+    }
+
     /// Shows the Trim dialog if it's open, and carries out what was chosen.
     fn show_trim(&mut self, ctx: &egui::Context) {
         use super::trim::Choice;
@@ -420,6 +464,11 @@ impl ClipsPage {
             Choice::Copy { start, end } => library::trimmed_temp_copy(&path, start, end, self.volumes_of(&path)).map(|tmp| {
                 send(Command::CopyClip(tmp, library::Tracks::Both));
                 Some("Trimmed copy copied. Paste it into a Discord chat with Ctrl+V.".to_string())
+            }),
+            Choice::DiscordReady { start, end } => self.make_discord_ready(&path, start, end).and_then(|msg| {
+                msg.map(Some).ok_or_else(|| {
+                    anyhow::anyhow!("The selection is longer than {} seconds.", library::SOUNDBOARD_MAX_SECONDS)
+                })
             }),
         };
         match result {
@@ -692,7 +741,8 @@ fn tile(
     }
     if menu_open {
         let has_tracks = matches!(analysis, Some(Ok(a)) if a.channels == crate::clip::TRACK_CHANNELS);
-        if let Some(a) = card_menu(ui, id, &more, has_tracks) {
+        let ready = matches!(analysis, Some(Ok(a)) if library::is_discord_ready(clip, a.seconds, a.channels, custom_mix));
+        if let Some(a) = card_menu(ui, id, &more, has_tracks, ready) {
             action = Some(a);
         }
     }
@@ -788,24 +838,28 @@ fn more_button(ui: &mut Ui, open: bool) -> egui::Response {
 
 /// The ⋯ menu, opening below its button like Discord's context menus.
 /// Returns the picked item, or `CloseMenu` on a click outside it.
-fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool) -> Option<Action> {
+fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool, ready: bool) -> Option<Action> {
     use library::Tracks;
     let mut picked = None;
     // Groups, separated by a line. Clips with separate tracks can copy one.
-    let mut groups: Vec<Vec<(&str, fn() -> Action)>> = Vec::new();
+    // An item without an action is shown greyed out.
+    let mut groups: Vec<Vec<(&str, Option<fn() -> Action>)>> = Vec::new();
     if has_tracks {
         groups.push(vec![
-            ("Volume…", || Action::OpenVolume),
-            ("Copy Discord only", || Action::Copy(Tracks::Discord)),
-            ("Copy mic only", || Action::Copy(Tracks::Mic)),
+            ("Volume…", Some(|| Action::OpenVolume)),
+            ("Copy Discord only", Some(|| Action::Copy(Tracks::Discord))),
+            ("Copy mic only", Some(|| Action::Copy(Tracks::Mic))),
         ]);
     }
+    let soundboard: (&str, Option<fn() -> Action>) =
+        if ready { ("Already Discord-ready", None) } else { ("Make Discord-ready", Some(|| Action::DiscordReady)) };
     groups.push(vec![
-        ("Trim…", || Action::Trim),
-        ("Rename", || Action::StartRename),
-        ("Show in Explorer", || Action::Show),
+        ("Trim…", Some(|| Action::Trim)),
+        soundboard,
+        ("Rename", Some(|| Action::StartRename)),
+        ("Show in Explorer", Some(|| Action::Show)),
     ]);
-    groups.push(vec![("Delete", || Action::Delete)]);
+    groups.push(vec![("Delete", Some(|| Action::Delete))]);
     let area = egui::Area::new(id.with("menu"))
         .order(egui::Order::Foreground)
         .pivot(Align2::RIGHT_TOP)
@@ -828,6 +882,11 @@ fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool) -
                         }
                         for (label, make) in group {
                             let danger = *label == "Delete";
+                            let Some(make) = make else {
+                                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+                                ui.painter().text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, *label, font(14.0, Weight::Semibold), TEXT_MUTED);
+                                continue;
+                            };
                             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
                             // Hover like Discord: blurple, or red for Delete.
                             if resp.hovered() {

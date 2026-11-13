@@ -364,16 +364,131 @@ pub fn read_stereo(path: &Path, tracks: Tracks, volumes: Volumes) -> Result<(Vec
 
 /// `audio` as interleaved stereo; see `read_stereo`.
 fn to_stereo(audio: &Audio, tracks: Tracks, volumes: Volumes) -> Vec<f32> {
+    let mut samples = stereo_unclamped(audio, tracks, volumes);
+    if audio.channels == crate::clip::TRACK_CHANNELS {
+        for s in &mut samples {
+            *s = s.clamp(-1.0, 1.0);
+        }
+    }
+    samples
+}
+
+/// Like `to_stereo`, but a loud mix of two tracks can go past -1..=1 (so it
+/// can be scaled down instead of clipped).
+fn stereo_unclamped(audio: &Audio, tracks: Tracks, volumes: Volumes) -> Vec<f32> {
     let (d, m) = tracks.gains(volumes);
     match audio.channels.max(1) as usize {
         1 => audio.samples.iter().flat_map(|&s| [s, s]).collect(),
         2 => audio.samples.clone(),
-        4 => audio
-            .samples
-            .chunks_exact(4)
-            .flat_map(|f| [(f[0] * d + f[2] * m).clamp(-1.0, 1.0), (f[1] * d + f[3] * m).clamp(-1.0, 1.0)])
-            .collect(),
+        4 => audio.samples.chunks_exact(4).flat_map(|f| [f[0] * d + f[2] * m, f[1] * d + f[3] * m]).collect(),
         n => audio.samples.chunks_exact(n).flat_map(|f| [f[0], f[1]]).collect(),
+    }
+}
+
+/// Discord's soundboard limits (#25), in one place in case Discord changes
+/// them. The length is confirmed; the size isn't (512 KB is the figure
+/// usually given). A 5 s MP3 at 192 kbps is about 120 KB, far below it.
+pub const SOUNDBOARD_MAX_SECONDS: f32 = 5.0;
+pub const SOUNDBOARD_MAX_BYTES: u64 = 512 * 1024;
+/// Discord-ready clips are MP3, which the soundboard takes.
+const SOUNDBOARD_FORMAT: Format = Format::Mp3High;
+/// Discord-ready clips are scaled so their loudest peak is here (-1 dBFS).
+const SOUNDBOARD_PEAK: f32 = 0.891;
+/// Selections up to this much over the limit (rounding) are cut to the limit.
+const SOUNDBOARD_SLACK_SECONDS: f32 = 0.05;
+/// The MP3 encoder adds up to ~50 ms of silence (its delay at the start,
+/// padding to a whole frame at the end). The audio is cut this much shorter
+/// so the file itself still plays for at most `SOUNDBOARD_MAX_SECONDS`.
+const MP3_PADDING_SECONDS: f32 = 0.05;
+
+/// What `make_discord_ready` did.
+#[derive(Debug, PartialEq)]
+pub enum DiscordReady {
+    /// Replaced the clip with this file.
+    Done(PathBuf),
+    /// Nothing changed: the clip (or selection) is this long, over the limit.
+    TooLong(f32),
+}
+
+/// Is this clip already soundboard-ready as it is: a stereo (or mono) MP3
+/// within the limits, without a custom mix?
+pub fn is_discord_ready(clip: &ClipFile, seconds: f32, channels: u16, custom_mix: bool) -> bool {
+    Format::of_path(&clip.path).is_some_and(|f| f.extension() == "mp3")
+        && channels <= 2
+        && seconds <= SOUNDBOARD_MAX_SECONDS + SOUNDBOARD_SLACK_SECONDS
+        && clip.size <= SOUNDBOARD_MAX_BYTES
+        && !custom_mix
+}
+
+/// Turns the part of `src` between `start` and `end` (0..=1) into a file for
+/// Discord's soundboard (#25) and replaces the clip with it: the tracks mixed
+/// into one stereo track at `volumes`, peak-normalised, as an MP3 within the
+/// soundboard's limits. The original goes to the Recycle Bin; the new file
+/// has the clip's name with `.mp3`. Longer than the limit: nothing changes.
+pub fn make_discord_ready(src: &Path, start: f32, end: f32, volumes: Volumes) -> Result<DiscordReady> {
+    make_discord_ready_with(src, start, end, volumes, recycle)
+}
+
+/// `make_discord_ready`, with `remove` getting rid of the original.
+fn make_discord_ready_with(
+    src: &Path,
+    start: f32,
+    end: f32,
+    volumes: Volumes,
+    remove: impl Fn(&Path) -> Result<()>,
+) -> Result<DiscordReady> {
+    let audio = crate::audio::read(src)?;
+    let part = if start <= 0.0 && end >= 1.0 { audio } else { trimmed(&audio, start, end)? };
+    let mut stereo = Audio { samples: stereo_unclamped(&part, Tracks::Both, volumes), channels: 2, rate: part.rate };
+    let seconds = stereo.seconds();
+    if seconds > SOUNDBOARD_MAX_SECONDS + SOUNDBOARD_SLACK_SECONDS {
+        return Ok(DiscordReady::TooLong(seconds));
+    }
+    let max_frames = ((SOUNDBOARD_MAX_SECONDS - MP3_PADDING_SECONDS) * stereo.rate as f32) as usize;
+    stereo.samples.truncate(max_frames * 2);
+    normalize_peak(&mut stereo.samples, SOUNDBOARD_PEAK);
+
+    let dir = src.parent().context("clip has no folder")?;
+    let tmp = dir.join(format!(".discord-ready-{}.mp3", std::process::id()));
+    crate::audio::write(&tmp, &stereo, SOUNDBOARD_FORMAT)?;
+    let size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+    if size > SOUNDBOARD_MAX_BYTES {
+        let _ = std::fs::remove_file(&tmp);
+        bail!("the MP3 is {} KB, over the soundboard's {} KB", size / 1024, SOUNDBOARD_MAX_BYTES / 1024);
+    }
+    let dest = discord_ready_path(src)?;
+    if let Err(e) = remove(src) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, &dest).with_context(|| format!("saving {}", dest.display()))?;
+    Ok(DiscordReady::Done(dest))
+}
+
+/// Where the Discord-ready file of `src` goes: the same name with `.mp3`
+/// (the same file if it's an MP3 already), without overwriting another clip.
+fn discord_ready_path(src: &Path) -> Result<PathBuf> {
+    let dir = src.parent().context("clip has no folder")?;
+    let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let same = |p: &Path| p.as_os_str().to_string_lossy().eq_ignore_ascii_case(&src.as_os_str().to_string_lossy());
+    let mut dest = dir.join(format!("{stem}.mp3"));
+    let mut n = 2;
+    while dest.exists() && !same(&dest) {
+        dest = dir.join(format!("{stem} ({n}).mp3"));
+        n += 1;
+    }
+    Ok(dest)
+}
+
+/// Scales `samples` so the loudest one is at `peak`. Silence stays silent.
+fn normalize_peak(samples: &mut [f32], peak: f32) {
+    let max = samples.iter().fold(0f32, |m, s| m.max(s.abs()));
+    if max < 1e-4 {
+        return;
+    }
+    let gain = peak / max;
+    for s in samples {
+        *s *= gain;
     }
 }
 
@@ -588,6 +703,67 @@ mod tests {
         assert_eq!(channels(&trimmed).unwrap(), 4);
         assert_eq!(channels(&trimmed_temp_copy(&src, 0.0, 0.5, Volumes::default()).unwrap()).unwrap(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #25: one click turns a clip into a soundboard MP3 in its place.
+    #[test]
+    fn makes_clips_discord_ready() {
+        let dir = std::env::temp_dir().join(format!("discord-clip-ready-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 4 s, separate tracks: a quiet tone on Discord, a quieter one on the mic.
+        let tone = |i: usize, f: f32, a: f32| a * (2.0 * std::f32::consts::PI * f * i as f32 / 48_000.0).sin();
+        let samples: Vec<f32> = (0..48_000 * 4)
+            .flat_map(|i| {
+                let (d, m) = (tone(i, 440.0, 0.2), tone(i, 330.0, 0.1));
+                [d, d, m, m]
+            })
+            .collect();
+        let src = dir.join("discord_clip_20261113_120000 Bob.ogg");
+        crate::audio::write(&src, &Audio { samples, channels: 4, rate: 48_000 }, Format::Opus).unwrap();
+        // Tests delete the original instead of filling the Recycle Bin.
+        let ready = |p: &Path, start: f32, end: f32, v: Volumes| {
+            make_discord_ready_with(p, start, end, v, |p| Ok(std::fs::remove_file(p)?)).unwrap()
+        };
+
+        let v = Volumes { discord: 1.0, mic: 0.0 };
+        let DiscordReady::Done(out) = ready(&src, 0.0, 1.0, v) else { panic!("too long?") };
+        assert_eq!(out.file_name().unwrap(), "discord_clip_20261113_120000 Bob.mp3");
+        assert!(!src.exists(), "the original is gone");
+        let back = crate::audio::read(&out).unwrap();
+        assert_eq!(back.channels, 2);
+        let len = back.seconds();
+        assert!((4.0..4.1).contains(&len), "{len}");
+        // Peak-normalised to about -1 dBFS (MP3 can overshoot a little).
+        let peak = back.samples.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!((0.8..=1.0).contains(&peak), "{peak}");
+        let size = std::fs::metadata(&out).unwrap().len();
+        assert!(size <= SOUNDBOARD_MAX_BYTES, "{size}");
+        let clip = scan(&dir).into_iter().find(|c| c.path == out).unwrap();
+        assert!(is_discord_ready(&clip, len, 2, false));
+        assert!(!is_discord_ready(&clip, len, 2, true), "a custom mix still needs baking in");
+
+        // A selection of exactly 5 s fits, even as an MP3 already.
+        let wav = dir.join("long.wav");
+        crate::clip::write_wav(&wav, &vec![0.25f32; 48_000 * 2 * 10]).unwrap();
+        assert_eq!(ready(&wav, 0.0, 1.0, Volumes::default()), DiscordReady::TooLong(10.0));
+        assert!(wav.exists(), "too long: nothing changed");
+        let DiscordReady::Done(five) = ready(&wav, 0.5, 1.0, Volumes::default()) else { panic!() };
+        let five_len = crate::audio::read(&five).unwrap().seconds();
+        assert!((4.9..=SOUNDBOARD_MAX_SECONDS).contains(&five_len), "{five_len}");
+        // Running it on an MP3 replaces it in place.
+        let DiscordReady::Done(again) = ready(&five, 0.0, 1.0, Volumes::default()) else { panic!() };
+        assert_eq!(again, five);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn normalizes_peaks() {
+        let mut s = vec![0.1, -0.5, 0.25];
+        normalize_peak(&mut s, 1.0);
+        assert_eq!(s, vec![0.2, -1.0, 0.5]);
+        let mut quiet = vec![0.0, 0.00001];
+        normalize_peak(&mut quiet, 1.0);
+        assert_eq!(quiet, vec![0.0, 0.00001]);
     }
 
     /// #8: Opus and FLAC clips with separate tracks are listed, analysed,
