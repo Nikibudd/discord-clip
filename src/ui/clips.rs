@@ -1,6 +1,6 @@
 //! The Clips page: the clips folder as a grid of cards, each with a
 //! waveform player (play/pause, click or drag on the waveform to scrub) and
-//! a Make Discord-ready button and a ⋯ menu (Copy, Trim, Rename, ...).
+//! a Make Discord-ready button and a ⋯ menu (Copy, Edit, Rename, ...).
 //!
 //! Listing the folder is cheap and redone every couple of seconds while the
 //! page is open, so new clips appear on their own. Reading a clip's waveform
@@ -50,15 +50,12 @@ pub struct ClipsPage {
     search: String,
     /// The clip whose name is being edited, and the text so far.
     renaming: Option<(PathBuf, String)>,
-    /// The Trim dialog, while it's open.
-    trim: Option<super::trim::TrimDialog>,
+    /// The Edit dialog, while it's open.
+    edit: Option<super::edit::EditDialog>,
     /// The clip whose ⋯ menu is open.
     menu: Option<PathBuf>,
     /// Stored track volumes of all clips (#7), reloaded with each scan.
     volumes: volumes::Table,
-    /// The clip whose Volume panel is open, and its volumes so far (while
-    /// dragging, these aren't stored yet).
-    volume_panel: Option<(PathBuf, Volumes)>,
 }
 
 enum Action {
@@ -80,16 +77,10 @@ enum Action {
     ToggleMenu,
     /// Clicked outside the open menu.
     CloseMenu,
-    /// Open the Trim dialog.
-    Trim,
+    /// Open the Edit dialog (trim and track volumes).
+    Edit,
     /// Turn the clip into a soundboard MP3 in its place (#25).
     DiscordReady,
-    /// Open the Volume panel (clips with separate tracks).
-    OpenVolume,
-    /// Moved a volume slider; `true` once let go (then it's stored).
-    SetVolumes(Volumes, bool),
-    /// Clicked outside the Volume panel and its card.
-    CloseVolume,
 }
 
 /// How a card's player looks this frame.
@@ -112,22 +103,18 @@ impl ClipsPage {
     /// The window is being hidden: stop all playback and close the dialog.
     pub fn on_hide(&mut self) {
         self.stop();
-        self.trim = None;
+        self.edit = None;
         self.renaming = None;
         self.menu = None;
-        self.volume_panel = None;
     }
 
     fn is_loaded(&self, clip: &ClipFile) -> bool {
         self.player.as_ref().is_some_and(|p| p.path() == clip.path)
     }
 
-    /// A clip's track volumes: what the open Volume panel shows, else what's stored.
+    /// A clip's stored track volumes.
     fn volumes_of(&self, path: &Path) -> Volumes {
-        match &self.volume_panel {
-            Some((p, v)) if p == path => *v,
-            _ => volumes::lookup(&self.volumes, path),
-        }
+        volumes::lookup(&self.volumes, path)
     }
 
     pub fn show(&mut self, ui: &mut Ui, snap: &Snapshot) {
@@ -173,7 +160,7 @@ impl ClipsPage {
             self.grid(ui, &visible, today);
         }
 
-        self.show_trim(ui.ctx());
+        self.show_edit(ui.ctx());
         self.show_toast(ui);
     }
 
@@ -236,9 +223,8 @@ impl ClipsPage {
                 };
                 let editing = self.renaming.as_mut().filter(|(p, _)| *p == clip.path).map(|(_, text)| text);
                 let menu_open = self.menu.as_deref() == Some(clip.path.as_path());
-                let volume = self.volume_panel.as_ref().filter(|(p, _)| *p == clip.path).map(|(_, v)| *v);
                 let custom_mix = !volumes::lookup(&self.volumes, &clip.path).is_default();
-                let card = Card { view, menu_open, volume, custom_mix };
+                let card = Card { view, menu_open, custom_mix };
                 if let Some(action) = tile(ui, rect, clip, analysis, card, editing, today) {
                     self.act(action, clip);
                 }
@@ -252,7 +238,6 @@ impl ClipsPage {
         match action {
             Action::ToggleMenu => {
                 self.menu = if this_menu_open { None } else { Some(clip.path.clone()) };
-                self.volume_panel = None;
                 return;
             }
             Action::CloseMenu => {
@@ -261,38 +246,11 @@ impl ClipsPage {
                 }
                 return;
             }
-            Action::CloseVolume => {
-                if self.volume_panel.as_ref().is_some_and(|(p, _)| *p == clip.path) {
-                    self.volume_panel = None;
-                }
-                return;
-            }
             // Anything else (including a menu item) closes the menu.
             _ => self.menu = None,
         }
         let result = match action {
-            Action::ToggleMenu | Action::CloseMenu | Action::CloseVolume => Ok(()),
-            Action::OpenVolume => {
-                self.volume_panel = Some((clip.path.clone(), volumes::lookup(&self.volumes, &clip.path)));
-                Ok(())
-            }
-            Action::SetVolumes(v, store) => {
-                self.volume_panel = Some((clip.path.clone(), v));
-                // Heard straight away if this clip is playing.
-                if let Some(p) = self.player.as_mut().filter(|p| p.path() == clip.path) {
-                    p.set_volumes(v);
-                }
-                if store {
-                    match volumes::set(&clip.path, v) {
-                        Ok(()) => self.volumes = volumes::load(),
-                        Err(e) => {
-                            crate::log!("saving volumes failed: {e:#}");
-                            self.toast = Some((format!("Couldn't save the volume: {e:#}"), Instant::now()));
-                        }
-                    }
-                }
-                Ok(())
-            }
+            Action::ToggleMenu | Action::CloseMenu => Ok(()),
             Action::Toggle => match &mut self.player {
                 Some(p) if p.path() == clip.path => {
                     if p.is_paused() {
@@ -337,21 +295,21 @@ impl ClipsPage {
                 self.renaming = Some((clip.path.clone(), clip.name.clone().unwrap_or_default()));
                 Ok(())
             }
-            Action::Trim => {
+            Action::Edit => {
                 self.stop(); // the dialog has its own playback
                 let v = self.volumes_of(&clip.path);
-                super::trim::TrimDialog::open(clip, v).map(|d| self.trim = Some(d))
+                super::edit::EditDialog::open(clip, v).map(|d| self.edit = Some(d))
             }
-            Action::DiscordReady => match self.make_discord_ready(&clip.path, 0.0, 1.0) {
+            Action::DiscordReady => match self.make_discord_ready(&clip.path) {
                 Ok(Some(msg)) => {
                     self.toast = Some((msg, Instant::now()));
                     Ok(())
                 }
-                // Too long: pick the part to keep in the Trim dialog.
+                // Too long: pick the part to keep in the Edit dialog first.
                 Ok(None) => {
                     self.stop();
                     let v = self.volumes_of(&clip.path);
-                    super::trim::TrimDialog::open_for_soundboard(clip, v).map(|d| self.trim = Some(d))
+                    super::edit::EditDialog::open_for_soundboard(clip, v).map(|d| self.edit = Some(d))
                 }
                 Err(e) => {
                     crate::log!("making {} Discord-ready failed: {e:#}", clip.path.display());
@@ -394,9 +352,6 @@ impl ClipsPage {
                     crate::log!("moving the volumes of {} failed: {e:#}", path.display());
                 }
                 self.volumes = volumes::load();
-                if let Some((p, _)) = self.volume_panel.as_mut().filter(|(p, _)| p == path) {
-                    *p = new.clone();
-                }
                 // Keep the waveform instead of reading the file again.
                 let mut analyses = self.analyses.lock().unwrap();
                 if let Some(a) = analyses.remove(path) {
@@ -415,14 +370,13 @@ impl ClipsPage {
     }
 
     /// Replaces the clip with its Discord-ready version (#25). Returns the
-    /// message to show, or `None` when the selection is too long (nothing
-    /// changed).
-    fn make_discord_ready(&mut self, path: &Path, start: f32, end: f32) -> anyhow::Result<Option<String>> {
+    /// message to show, or `None` when the clip is too long (nothing changed).
+    fn make_discord_ready(&mut self, path: &Path) -> anyhow::Result<Option<String>> {
         let v = self.volumes_of(path);
         if self.player.as_ref().is_some_and(|p| p.path() == path) {
             self.stop();
         }
-        let new = match library::make_discord_ready(path, start, end, v)? {
+        let new = match library::make_discord_ready(path, 0.0, 1.0, v)? {
             library::DiscordReady::TooLong(_) => return Ok(None),
             library::DiscordReady::Done(new) => new,
         };
@@ -432,58 +386,46 @@ impl ClipsPage {
             crate::log!("clearing the volumes of {} failed: {e:#}", path.display());
         }
         self.volumes = volumes::load();
-        if self.volume_panel.as_ref().is_some_and(|(p, _)| p == path) {
-            self.volume_panel = None;
-        }
         self.last_scan = None; // show the new file now
         Ok(Some(format!("Discord-ready: {}. The original is in the Recycle Bin.", file_name(&new))))
     }
 
-    /// Shows the Trim dialog if it's open, and carries out what was chosen.
-    fn show_trim(&mut self, ctx: &egui::Context) {
-        use super::trim::Choice;
-        let Some(dialog) = &mut self.trim else { return };
+    /// Shows the Edit dialog if it's open, and carries out what was chosen.
+    fn show_edit(&mut self, ctx: &egui::Context) {
+        use super::edit::Choice;
+        let Some(dialog) = &mut self.edit else { return };
         let Some(choice) = dialog.show(ctx) else { return };
         let path = dialog.clip().path.clone();
         let result = match choice {
             Choice::Cancel => Ok(None),
-            Choice::SaveNew { start, end } => library::save_trimmed_copy(&path, start, end).map(|p| {
-                // The trimmed copy keeps the clip's volumes.
-                if let Err(e) = volumes::copy(&path, &p) {
-                    crate::log!("copying the volumes of {} failed: {e:#}", path.display());
-                }
-                Some(format!("Saved as {}.", file_name(&p)))
-            }),
-            Choice::Replace { start, end } => {
+            Choice::Save { start, end, volumes: v } => {
                 if self.player.as_ref().is_some_and(|p| p.path() == path) {
                     self.stop();
                 }
-                library::replace_with_trimmed(&path, start, end)
-                    .map(|()| Some("Trimmed. The original is in the Recycle Bin.".to_string()))
-            }
-            Choice::Copy { start, end } => library::trimmed_temp_copy(&path, start, end, self.volumes_of(&path)).map(|tmp| {
-                send(Command::CopyClip(tmp, library::Tracks::Both));
-                Some("Trimmed copy copied. Paste it into a Discord chat with Ctrl+V.".to_string())
-            }),
-            Choice::DiscordReady { start, end } => self.make_discord_ready(&path, start, end).and_then(|msg| {
-                msg.map(Some).ok_or_else(|| {
-                    anyhow::anyhow!("The selection is longer than {} seconds.", library::SOUNDBOARD_MAX_SECONDS)
+                let trimmed = start > 0.0 || end < 1.0;
+                let written = if trimmed { library::replace_with_trimmed(&path, start, end) } else { Ok(()) };
+                written.and_then(|()| volumes::set(&path, v)).map(|()| {
+                    Some(if trimmed { "Saved. The original is in the Recycle Bin." } else { "Saved." }.to_string())
                 })
-            }),
+            }
+            // The new clip gets these volumes; the original keeps its own.
+            Choice::SaveNew { start, end, volumes: v } => library::save_edited_copy(&path, start, end)
+                .and_then(|p| volumes::set(&p, v).map(|()| Some(format!("Saved as {}.", file_name(&p))))),
         };
         match result {
             Ok(msg) => {
-                self.trim = None;
+                self.edit = None;
                 if let Some(msg) = msg {
-                    crate::log!("trim of {}: {msg}", path.display());
+                    crate::log!("edit of {}: {msg}", path.display());
                     self.toast = Some((msg, Instant::now()));
+                    self.volumes = volumes::load();
                     self.last_scan = None; // show the new / changed clip now
                 }
             }
             Err(e) => {
-                crate::log!("trim of {} failed: {e:#}", path.display());
+                crate::log!("edit of {} failed: {e:#}", path.display());
                 // Keep the dialog open so the user can try again.
-                if let Some(d) = &mut self.trim {
+                if let Some(d) = &mut self.edit {
                     d.set_error(format!("{e:#}"));
                 }
             }
@@ -564,8 +506,6 @@ fn empty_state(ui: &mut Ui, snap: &Snapshot) {
 struct Card {
     view: PlayerView,
     menu_open: bool,
-    /// The Volume panel is open with these volumes.
-    volume: Option<Volumes>,
     /// The clip has stored volumes other than 100%.
     custom_mix: bool,
 }
@@ -580,7 +520,7 @@ fn tile(
     editing: Option<&mut String>,
     today: i32,
 ) -> Option<Action> {
-    let Card { view, menu_open, volume, custom_mix } = card_state;
+    let Card { view, menu_open, custom_mix } = card_state;
     let id = ui.make_persistent_id(("clip", &clip.path));
     let card = ui.interact(rect, id, Sense::hover());
     let fill = if card.hovered() { mix(BG_SECONDARY, BG_HOVER, 0.6) } else { BG_SECONDARY };
@@ -757,76 +697,7 @@ fn tile(
             action = Some(a);
         }
     }
-    if let Some(v) = volume {
-        // Don't let the panel override a click on the card (e.g. Play).
-        if let Some(a) = volume_panel(ui, id, &more, rect, v) {
-            action = action.or(Some(a));
-        }
-    }
     action
-}
-
-/// The Volume panel of a clip with separate tracks, below its ⋯ button: a
-/// slider for each track and Reset. Sliders report every move (so playback
-/// follows) and are stored once let go. Clicks on the card itself (Play,
-/// the waveform) leave it open, so you can listen while adjusting.
-fn volume_panel(ui: &Ui, id: egui::Id, button: &egui::Response, card: Rect, v: Volumes) -> Option<Action> {
-    let mut picked = None;
-    let area = egui::Area::new(id.with("volume"))
-        .order(egui::Order::Foreground)
-        .pivot(Align2::RIGHT_TOP)
-        .fixed_pos(button.rect.right_bottom() + vec2(0.0, 4.0))
-        .show(ui.ctx(), |ui| {
-            Frame::new()
-                .fill(BG_FLOATING)
-                .corner_radius(CornerRadius::same(4))
-                .inner_margin(Margin::same(14))
-                .show(ui, |ui| {
-                    ui.set_width(240.0);
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    text(ui, "Volume", 12.0, Weight::Bold, HEADER_SECONDARY);
-                    ui.add_space(8.0);
-                    for track in 0..2 {
-                        let mut new = v;
-                        let (label, value) = if track == 0 { ("Discord", &mut new.discord) } else { ("Mic", &mut new.mic) };
-                        let width = ui.available_width();
-                        ui.allocate_ui_with_layout(vec2(width, 18.0), Layout::left_to_right(Align::Center), |ui| {
-                            text(ui, label, 14.0, Weight::Semibold, TEXT_NORMAL);
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                text(ui, format!("{}%", (*value * 100.0).round() as u32), 14.0, Weight::Semibold, HEADER_PRIMARY);
-                            });
-                        });
-                        let r = slider(ui, value, 0.0..=Volumes::MAX, 0.05, true);
-                        let new = new; // ends the borrow of `value`
-                        if r.drag_stopped() || r.clicked() {
-                            picked = Some(Action::SetVolumes(new, true));
-                        } else if new != v {
-                            picked = Some(Action::SetVolumes(new, false));
-                        }
-                        ui.add_space(6.0);
-                    }
-                    ui.add_space(4.0);
-                    let width = ui.available_width();
-                    ui.allocate_ui_with_layout(vec2(width, 30.0), Layout::right_to_left(Align::Center), |ui| {
-                        if v.is_default() {
-                            text(ui, "As recorded", 13.0, Weight::Regular, TEXT_MUTED);
-                        } else if button_sized(ui, "Reset", ButtonKind::Secondary, 28.0)
-                            .on_hover_text("Back to 100% for both")
-                            .clicked()
-                        {
-                            picked = Some(Action::SetVolumes(Volumes::default(), true));
-                        }
-                    });
-                });
-        });
-    let panel = area.response.rect;
-    let clicked_outside = ui.input(|i| {
-        i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| !panel.contains(p) && !card.contains(p))
-    });
-    if picked.is_none() && clicked_outside {
-        picked = Some(Action::CloseVolume);
-    }
-    picked
 }
 
 /// The square "⋯" button at the right of a card.
@@ -855,17 +726,12 @@ fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool) -
     // Groups, separated by a line: copying (for chats; clips with separate
     // tracks can copy one), editing, deleting.
     let mut copy: Vec<(&str, fn() -> Action)> = vec![("Copy", || Action::Copy(Tracks::Both))];
-    let mut edit: Vec<(&str, fn() -> Action)> = Vec::new();
     if has_tracks {
         copy.push(("Copy Discord only", || Action::Copy(Tracks::Discord)));
         copy.push(("Copy mic only", || Action::Copy(Tracks::Mic)));
-        edit.push(("Volume…", || Action::OpenVolume));
     }
-    edit.extend([
-        ("Trim…", (|| Action::Trim) as fn() -> Action),
-        ("Rename", || Action::StartRename),
-        ("Show in Explorer", || Action::Show),
-    ]);
+    let edit: Vec<(&str, fn() -> Action)> =
+        vec![("Edit…", || Action::Edit), ("Rename", || Action::StartRename), ("Show in Explorer", || Action::Show)];
     let groups = [copy, edit, vec![("Delete", || Action::Delete)]];
     let area = egui::Area::new(id.with("menu"))
         .order(egui::Order::Foreground)

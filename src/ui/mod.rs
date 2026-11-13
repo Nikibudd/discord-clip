@@ -12,11 +12,11 @@
 //! * `clips`, `settings` (+ `keybind`), `updates`: the pages
 
 mod clips;
+mod edit;
 mod keybind;
 mod settings;
 mod sidebar;
 mod theme;
-mod trim;
 mod updates;
 mod widgets;
 
