@@ -27,16 +27,16 @@ impl ConfirmDialog {
         let width = (ctx.content_rect().width() - 80.0).clamp(280.0, 440.0);
         let modal = egui::Modal::new(egui::Id::unique("confirm-dialog"))
             .backdrop_color(Color32::from_black_alpha(170))
-            .frame(Frame::new().fill(BG_PRIMARY).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(20)))
+            .frame(Frame::new().fill(pal().bg_primary).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(20)))
             .show(ctx, |ui| {
                 ui.set_width(width);
                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-                text(ui, self.title.as_str(), 20.0, Weight::Bold, HEADER_PRIMARY);
+                text(ui, self.title.as_str(), 20.0, Weight::Bold, pal().header_primary);
                 ui.add_space(10.0);
-                text(ui, self.text.as_str(), 15.0, Weight::Regular, TEXT_NORMAL);
+                text(ui, self.text.as_str(), 15.0, Weight::Regular, pal().text_normal);
                 ui.add_space(20.0);
                 Frame::new()
-                    .fill(BG_SECONDARY)
+                    .fill(pal().bg_secondary)
                     .corner_radius(CornerRadius::same(6))
                     .inner_margin(Margin::symmetric(12, 10))
                     .show(ui, |ui| {

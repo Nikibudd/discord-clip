@@ -114,7 +114,7 @@ impl EditDialog {
         let width = (screen.width() - 80.0).clamp(320.0, 680.0);
         let modal = egui::Modal::new(egui::Id::unique("edit-dialog"))
             .backdrop_color(Color32::from_black_alpha(170))
-            .frame(Frame::new().fill(BG_PRIMARY).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(20)))
+            .frame(Frame::new().fill(pal().bg_primary).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(20)))
             .show(ctx, |ui| {
                 ui.set_width(width);
                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
@@ -135,10 +135,10 @@ impl EditDialog {
 
     fn contents(&mut self, ui: &mut Ui, choice: &mut Option<Choice>) {
         let max = library::SOUNDBOARD_MAX_SECONDS;
-        text(ui, "Edit clip", 20.0, Weight::Bold, HEADER_PRIMARY);
+        text(ui, "Edit clip", 20.0, Weight::Bold, pal().header_primary);
         ui.add_space(4.0);
         let title = self.clip.name.clone().or_else(|| self.clip.saved.map(|s| when(s, today()))).unwrap_or_default();
-        text(ui, format!("{title} · {}", clock(self.seconds)), 14.0, Weight::Regular, HEADER_SECONDARY);
+        text(ui, format!("{title} · {}", clock(self.seconds)), 14.0, Weight::Regular, pal().header_secondary);
         if self.soundboard {
             ui.add_space(8.0);
             text(
@@ -146,7 +146,7 @@ impl EditDialog {
                 format!("Discord's soundboard takes {max} seconds at most. Select the part to keep and Save, then Make Discord-ready."),
                 14.0,
                 Weight::Regular,
-                TEXT_NORMAL,
+                pal().text_normal,
             );
         }
         ui.add_space(16.0);
@@ -163,18 +163,18 @@ impl EditDialog {
             let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
             let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
             play_button(ui, rect.center(), playing, resp.hovered());
-            let label = ui.add(egui::Label::new(egui::RichText::new(if playing { "Pause" } else { "Play selection" }).font(font(15.0, Weight::Semibold)).color(TEXT_NORMAL)).sense(Sense::click()));
+            let label = ui.add(egui::Label::new(egui::RichText::new(if playing { "Pause" } else { "Play selection" }).font(font(15.0, Weight::Semibold)).color(pal().text_normal)).sense(Sense::click()));
             if resp.clicked() || label.clicked() {
                 self.toggle_play();
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let summary = format!("{} selected · {}", clock_precise(selected), megabytes(bytes));
                 let (msg, color) = if self.soundboard && selected > max + 0.005 {
-                    (format!("{summary}: over the soundboard's {max} s"), YELLOW)
+                    (format!("{summary}: over the soundboard's {max} s"), pal().yellow)
                 } else if bytes > DISCORD_LIMIT {
-                    (format!("{summary}: over Discord's 10 MB limit"), YELLOW)
+                    (format!("{summary}: over Discord's 10 MB limit"), pal().yellow)
                 } else {
-                    (summary, HEADER_SECONDARY)
+                    (summary, pal().header_secondary)
                 };
                 text(ui, msg, 14.0, Weight::Semibold, color);
             });
@@ -187,14 +187,14 @@ impl EditDialog {
 
         if let Some(e) = &self.error {
             ui.add_space(10.0);
-            text(ui, e.as_str(), 14.0, Weight::Regular, RED);
+            text(ui, e.as_str(), 14.0, Weight::Regular, pal().red);
         }
 
         // Footer, like Discord's modals: darker strip with the buttons on the right.
         ui.add_space(20.0);
         let changed = self.changed();
         Frame::new()
-            .fill(BG_SECONDARY)
+            .fill(pal().bg_secondary)
             .corner_radius(CornerRadius::same(6))
             .inner_margin(Margin::symmetric(12, 10))
             .show(ui, |ui| {
@@ -236,9 +236,9 @@ impl EditDialog {
                 ui.allocate_ui_with_layout(vec2(w, 48.0), Layout::top_down(Align::Min), |ui| {
                     let value = if track == 0 { &mut self.volumes.discord } else { &mut self.volumes.mic };
                     ui.allocate_ui_with_layout(vec2(w, 18.0), Layout::left_to_right(Align::Center), |ui| {
-                        text(ui, *name, 14.0, Weight::Semibold, TEXT_NORMAL);
+                        text(ui, *name, 14.0, Weight::Semibold, pal().text_normal);
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            text(ui, format!("{}%", (*value * 100.0).round() as u32), 14.0, Weight::Semibold, HEADER_PRIMARY);
+                            text(ui, format!("{}%", (*value * 100.0).round() as u32), 14.0, Weight::Semibold, pal().header_primary);
                         });
                     });
                     slider(ui, value, 0.0..=Volumes::MAX, 0.05, true);
@@ -308,12 +308,12 @@ impl EditDialog {
         for (t, peaks) in self.tracks.iter().enumerate() {
             let top = panel.top() + t as f32 * (track_h + TRACK_GAP);
             let rect = Rect::from_x_y_ranges(panel.x_range(), top..=top + track_h);
-            painter.rect_filled(rect, CornerRadius::same(6), BG_TERTIARY);
+            painter.rect_filled(rect, CornerRadius::same(6), pal().bg_tertiary);
             let sel = Rect::from_x_y_ranges(x_at(self.start)..=x_at(self.end), rect.y_range());
-            painter.rect_filled(sel, CornerRadius::ZERO, mix(BG_TERTIARY, BLURPLE, 0.14));
+            painter.rect_filled(sel, CornerRadius::ZERO, mix(pal().bg_tertiary, BLURPLE, 0.14));
             // Two tracks: name in the corner, bars below it, sized by volume.
             let (bars, gain) = if n > 1 {
-                painter.text(rect.left_top() + vec2(10.0, 5.0), egui::Align2::LEFT_TOP, TRACK_NAMES[t], font(12.0, Weight::Bold), HEADER_SECONDARY);
+                painter.text(rect.left_top() + vec2(10.0, 5.0), egui::Align2::LEFT_TOP, TRACK_NAMES[t], font(12.0, Weight::Bold), pal().header_secondary);
                 let gain = if t == 0 { self.volumes.discord } else { self.volumes.mic };
                 (Rect::from_min_max(pos2(left, rect.top() + 22.0), pos2(right, rect.bottom() - 6.0)), gain)
             } else {
@@ -327,11 +327,11 @@ impl EditDialog {
                 let h = ((p * gain).min(1.0) * bars.height()).max(3.0);
                 let inside = f >= self.start && f <= self.end;
                 let color = if !inside {
-                    GRAY_BTN
+                    pal().gray_btn
                 } else if head.is_some_and(|h| f <= h) {
-                    Color32::WHITE
+                    pal().header_primary
                 } else {
-                    TEXT_NORMAL
+                    pal().text_normal
                 };
                 painter.rect_filled(Rect::from_center_size(pos2(x, bars.center().y), vec2(bar_w, h)), CornerRadius::same(1), color);
             }
@@ -350,15 +350,15 @@ impl EditDialog {
 
         if let Some(h) = head {
             let x = x_at(h);
-            painter.line_segment([pos2(x, panel.top() + 4.0), pos2(x, panel.bottom() - 4.0)], Stroke::new(2.0, Color32::WHITE));
+            painter.line_segment([pos2(x, panel.top() + 4.0), pos2(x, panel.bottom() - 4.0)], Stroke::new(2.0, pal().header_primary));
         }
 
         // Times under the handles, kept apart so they don't overlap.
         ui.add_space(6.0);
         let (row, _) = ui.allocate_exact_size(vec2(panel.width(), 18.0), Sense::hover());
         let font_id = font(13.0, Weight::Semibold);
-        let start_label = ui.painter().layout_no_wrap(clock_precise(self.start * self.seconds), font_id.clone(), HEADER_SECONDARY);
-        let end_label = ui.painter().layout_no_wrap(clock_precise(self.end * self.seconds), font_id, HEADER_SECONDARY);
+        let start_label = ui.painter().layout_no_wrap(clock_precise(self.start * self.seconds), font_id.clone(), pal().header_secondary);
+        let end_label = ui.painter().layout_no_wrap(clock_precise(self.end * self.seconds), font_id, pal().header_secondary);
         let (sx, ex) = place_labels(
             x_at(self.start),
             x_at(self.end),
@@ -367,8 +367,8 @@ impl EditDialog {
             row.left(),
             row.right(),
         );
-        ui.painter().galley(pos2(sx, row.top()), start_label, HEADER_SECONDARY);
-        ui.painter().galley(pos2(ex, row.top()), end_label, HEADER_SECONDARY);
+        ui.painter().galley(pos2(sx, row.top()), start_label, pal().header_secondary);
+        ui.painter().galley(pos2(ex, row.top()), end_label, pal().header_secondary);
     }
 
     fn toggle_play(&mut self) {

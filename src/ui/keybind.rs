@@ -96,17 +96,17 @@ impl KeybindRecorder {
         let width = ui.available_width().min(420.0);
         let (rect, resp) = ui.allocate_exact_size(vec2(width, 44.0), Sense::click());
         let painter = ui.painter();
-        painter.rect_filled(rect, CornerRadius::same(4), BG_TERTIARY);
+        painter.rect_filled(rect, CornerRadius::same(4), pal().bg_tertiary);
         if self.recording {
-            painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, RED), StrokeKind::Inside);
-            painter.rect_stroke(rect.expand(2.0), CornerRadius::same(6), Stroke::new(2.0, RED.gamma_multiply(0.3)), StrokeKind::Inside);
+            painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, pal().red), StrokeKind::Inside);
+            painter.rect_stroke(rect.expand(2.0), CornerRadius::same(6), Stroke::new(2.0, pal().red.gamma_multiply(0.3)), StrokeKind::Inside);
         } else if resp.hovered() {
-            painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, BG_FLOATING), StrokeKind::Inside);
+            painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, pal().bg_floating), StrokeKind::Inside);
         }
         let (label, color) = if self.recording {
-            ("Press a key combination…".to_string(), RED)
+            ("Press a key combination…".to_string(), pal().red)
         } else {
-            (current.to_string(), HEADER_PRIMARY)
+            (current.to_string(), pal().header_primary)
         };
         painter.text(pos2(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, label, font(16.0, Weight::Semibold), color);
 
