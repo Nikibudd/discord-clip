@@ -61,6 +61,38 @@ pub struct ClipsPage {
     uploaded: uploaded::Set,
     /// A confirm dialog (#30), and the clip to make Discord-ready once confirmed.
     confirm: Option<(super::confirm::ConfirmDialog, ClipFile)>,
+    /// Which clips are shown (#29). Not saved: every start shows the ones
+    /// not uploaded yet.
+    filter: Filter,
+}
+
+/// Which clips the Clips page shows, by their uploaded mark (#29).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum Filter {
+    #[default]
+    NotUploaded,
+    Uploaded,
+    All,
+}
+
+impl Filter {
+    const ALL: [Filter; 3] = [Filter::NotUploaded, Filter::Uploaded, Filter::All];
+
+    fn label(self) -> &'static str {
+        match self {
+            Filter::NotUploaded => "Not uploaded",
+            Filter::Uploaded => "Uploaded",
+            Filter::All => "All clips",
+        }
+    }
+
+    fn shows(self, uploaded: bool) -> bool {
+        match self {
+            Filter::NotUploaded => !uploaded,
+            Filter::Uploaded => uploaded,
+            Filter::All => true,
+        }
+    }
 }
 
 enum Action {
@@ -134,7 +166,17 @@ impl ClipsPage {
         let all: Vec<ClipFile> = self.clips.iter().filter(|c| !self.deleted.contains(&c.path)).cloned().collect();
         let today = today();
         let query = self.search.trim().to_lowercase();
-        let visible: Vec<ClipFile> = all.iter().filter(|c| matches_search(c, &query, today)).cloned().collect();
+        // The filter (#29) first, then search within what it shows.
+        let shown_by_filter = |c: &ClipFile| self.filter.shows(uploaded::is_marked(&self.uploaded, &c.path));
+        let shown: Vec<&ClipFile> = all.iter().filter(|c| shown_by_filter(c)).collect();
+        let hidden = all.len() - shown.len();
+        let visible: Vec<ClipFile> = shown.iter().filter(|c| matches_search(c, &query, today)).map(|c| (*c).clone()).collect();
+        // Search matches among the hidden clips, to point them out.
+        let hidden_matches = if query.is_empty() {
+            0
+        } else {
+            all.iter().filter(|c| !shown_by_filter(c) && matches_search(c, &query, today)).count()
+        };
 
         // Header
         let width = ui.available_width();
@@ -147,10 +189,17 @@ impl ClipsPage {
                 text(ui, "Clips", 20.0, Weight::Bold, HEADER_PRIMARY);
                 ui.add_space(4.0);
                 let total: u64 = all.iter().map(|c| c.size).sum();
+                let dir = snap.cfg.out_dir.display();
+                // "12 clips · 3 uploaded hidden · 1.4 MB · <folder>"
+                let hidden_note = match (hidden, self.filter) {
+                    (0, _) | (_, Filter::All) => String::new(),
+                    (n, Filter::NotUploaded) => format!(" · {n} uploaded hidden"),
+                    (n, Filter::Uploaded) => format!(" · {n} not uploaded hidden"),
+                };
                 let summary = match all.len() {
-                    0 => format!("Saved in {}", snap.cfg.out_dir.display()),
-                    1 => format!("1 clip · {} · {}", megabytes(total), snap.cfg.out_dir.display()),
-                    n => format!("{n} clips · {} · {}", megabytes(total), snap.cfg.out_dir.display()),
+                    0 => format!("Saved in {dir}"),
+                    1 => format!("1 clip{hidden_note} · {} · {dir}", megabytes(total)),
+                    n => format!("{n} clips{hidden_note} · {} · {dir}", megabytes(total)),
                 };
                 text(ui, summary, 14.0, Weight::Regular, HEADER_SECONDARY);
             });
@@ -158,14 +207,47 @@ impl ClipsPage {
         ui.add_space(16.0);
 
         if !all.is_empty() {
-            search_box(ui, &mut self.search);
+            ui.allocate_ui_with_layout(vec2(width, 40.0), Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                // In its own area: its text field is placed with `put`, which
+                // would otherwise move the row's cursor back over the box.
+                let search_w = (ui.available_width() - 182.0).clamp(160.0, 360.0);
+                ui.allocate_ui(vec2(search_w, 40.0), |ui| search_box(ui, &mut self.search));
+                ui.allocate_ui(vec2(170.0, 40.0), |ui| {
+                    let options: Vec<String> = Filter::ALL.iter().map(|f| f.label().to_string()).collect();
+                    let selected = Filter::ALL.iter().position(|f| *f == self.filter);
+                    if let (_, Some(i)) = dropdown(ui, "clip-filter", &options, selected, true) {
+                        self.filter = Filter::ALL[i];
+                    }
+                });
+            });
             ui.add_space(16.0);
         }
 
         if all.is_empty() {
             empty_state(ui, snap);
+        } else if shown.is_empty() {
+            // The filter hides every clip.
+            let (msg, show) = match self.filter {
+                Filter::NotUploaded => ("All your clips are uploaded.", "Show them"),
+                _ => ("No clips are marked as uploaded yet.", "Show all clips"),
+            };
+            if notice(ui, msg, show) {
+                self.filter = if self.filter == Filter::NotUploaded { Filter::Uploaded } else { Filter::All };
+            }
         } else if visible.is_empty() {
-            text(ui, format!("No clips match \"{}\".", self.search.trim()), 15.0, Weight::Regular, HEADER_SECONDARY);
+            let mut msg = format!("No clips match \"{}\".", self.search.trim());
+            let hidden_kind = if self.filter == Filter::NotUploaded { "uploaded" } else { "hidden" };
+            match hidden_matches {
+                0 => {}
+                1 => msg.push_str(&format!(" 1 {hidden_kind} clip matches.")),
+                n => msg.push_str(&format!(" {n} {hidden_kind} clips match.")),
+            }
+            if hidden_matches == 0 {
+                text(ui, msg, 15.0, Weight::Regular, HEADER_SECONDARY);
+            } else if notice(ui, &msg, "Show all clips") {
+                self.filter = Filter::All;
+            }
         } else {
             self.grid(ui, &visible, today);
         }
@@ -575,6 +657,17 @@ fn empty_state(ui: &mut Ui, snap: &Snapshot) {
         });
 }
 
+/// A line of text with a button after it; returns whether it was clicked.
+fn notice(ui: &mut Ui, msg: &str, button_label: &str) -> bool {
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(vec2(width, 32.0), Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        text(ui, msg, 15.0, Weight::Regular, HEADER_SECONDARY);
+        button(ui, button_label, ButtonKind::Secondary).clicked()
+    })
+    .inner
+}
+
 /// The state of a card that lives on the page, not in the clip.
 struct Card {
     view: PlayerView,
@@ -906,8 +999,9 @@ fn pencil(painter: &Painter, c: egui::Pos2, color: Color32) {
 }
 
 /// Discord-style search field with a magnifier and a clear button.
+/// 40 px tall, like the filter dropdown next to it.
 fn search_box(ui: &mut Ui, query: &mut String) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width().min(360.0), 34.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width().min(360.0), 40.0), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(4), BG_TERTIARY);
     // Magnifier.
     let c = pos2(rect.right() - 18.0, rect.center().y);
@@ -932,7 +1026,7 @@ fn search_box(ui: &mut Ui, query: &mut String) {
         .text_color(TEXT_NORMAL)
         .hint_text(egui::RichText::new("Search clips").color(TEXT_MUTED))
         .desired_width(rect.width() - 44.0);
-    let resp = ui.put(Rect::from_min_max(rect.min + vec2(10.0, 7.0), rect.max - vec2(34.0, 7.0)), edit);
+    let resp = ui.put(Rect::from_min_max(rect.min + vec2(10.0, 10.0), rect.max - vec2(34.0, 10.0)), edit);
     if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         query.clear();
     }
@@ -1052,6 +1146,15 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_shows_by_uploaded_mark() {
+        assert_eq!(Filter::default(), Filter::NotUploaded, "starts hiding uploaded clips");
+        let shows = |f: Filter| (f.shows(false), f.shows(true));
+        assert_eq!(shows(Filter::NotUploaded), (true, false));
+        assert_eq!(shows(Filter::Uploaded), (false, true));
+        assert_eq!(shows(Filter::All), (true, true));
+    }
 
     #[test]
     fn day_numbers() {
