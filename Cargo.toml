@@ -30,6 +30,10 @@ semver = "1.0.28"
 # Snappy, for reading Discord's Local Storage (#37).
 snap = "1"
 
+[build-dependencies]
+# Embeds the app icon in the exe (#42).
+winresource = "0.1"
+
 [dependencies.windows]
 version = "0.58"
 features = [
