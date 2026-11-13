@@ -23,6 +23,7 @@ use super::widgets::*;
 use super::{send, Command, Snapshot};
 use crate::library::{self, Analysis, ClipFile, SavedAt};
 use crate::player::Playback;
+use crate::uploaded;
 use crate::volumes::{self, Volumes};
 
 const RESCAN_EVERY: Duration = Duration::from_secs(2);
@@ -56,6 +57,8 @@ pub struct ClipsPage {
     menu: Option<PathBuf>,
     /// Stored track volumes of all clips (#7), reloaded with each scan.
     volumes: volumes::Table,
+    /// Clips marked as uploaded (#28), reloaded with each scan.
+    uploaded: uploaded::Set,
     /// A confirm dialog (#30), and the clip to make Discord-ready once confirmed.
     confirm: Option<(super::confirm::ConfirmDialog, ClipFile)>,
 }
@@ -85,6 +88,8 @@ enum Action {
     /// confirm (#30). What the card knows about the clip so far: whether it's
     /// too long for the soundboard, and whether it has separate tracks.
     DiscordReady { too_long: bool, tracks: bool },
+    /// Mark or unmark as uploaded to a soundboard (#28).
+    SetUploaded(bool),
 }
 
 /// How a card's player looks this frame.
@@ -178,6 +183,7 @@ impl ClipsPage {
             self.clips = library::scan(dir);
             self.last_scan = Some(Instant::now());
             self.volumes = volumes::load();
+            self.uploaded = uploaded::load();
             let present: HashSet<&PathBuf> = self.clips.iter().map(|c| &c.path).collect();
             self.deleted.retain(|p| present.contains(p));
             self.queued.retain(|p, _| present.contains(p));
@@ -230,7 +236,8 @@ impl ClipsPage {
                 let editing = self.renaming.as_mut().filter(|(p, _)| *p == clip.path).map(|(_, text)| text);
                 let menu_open = self.menu.as_deref() == Some(clip.path.as_path());
                 let custom_mix = !volumes::lookup(&self.volumes, &clip.path).is_default();
-                let card = Card { view, menu_open, custom_mix };
+                let uploaded = uploaded::is_marked(&self.uploaded, &clip.path);
+                let card = Card { view, menu_open, custom_mix, uploaded };
                 if let Some(action) = tile(ui, rect, clip, analysis, card, editing, today) {
                     self.act(action, clip);
                 }
@@ -294,7 +301,15 @@ impl ClipsPage {
                 }
                 self.deleted.insert(clip.path.clone());
                 send(Command::DeleteClip(clip.path.clone()));
+                // Its mark goes with it (also if it's restored later).
+                self.set_uploaded(&clip.path, false);
                 self.toast = Some(("Moved to the Recycle Bin.".into(), Instant::now()));
+                Ok(())
+            }
+            Action::SetUploaded(on) => {
+                self.set_uploaded(&clip.path, on);
+                let msg = if on { "Marked as uploaded." } else { "Marked as not uploaded." };
+                self.toast = Some((msg.into(), Instant::now()));
                 Ok(())
             }
             Action::StartRename => {
@@ -354,11 +369,12 @@ impl ClipsPage {
                 if let Some(p) = self.player.as_mut().filter(|p| p.path() == path) {
                     p.set_path(new.clone());
                 }
-                // The volumes follow the clip.
+                // The volumes and the uploaded mark follow the clip.
                 if let Err(e) = volumes::rename(path, &new) {
                     crate::log!("moving the volumes of {} failed: {e:#}", path.display());
                 }
                 self.volumes = volumes::load();
+                self.move_uploaded(path, &new);
                 // Keep the waveform instead of reading the file again.
                 let mut analyses = self.analyses.lock().unwrap();
                 if let Some(a) = analyses.remove(path) {
@@ -374,6 +390,23 @@ impl ClipsPage {
                 self.toast = Some((format!("Couldn't rename the clip: {e:#}"), Instant::now()));
             }
         }
+    }
+
+    /// Marks or unmarks a clip as uploaded (#28).
+    fn set_uploaded(&mut self, path: &Path, on: bool) {
+        if let Err(e) = uploaded::set(path, on) {
+            crate::log!("saving the uploaded mark of {} failed: {e:#}", path.display());
+            self.toast = Some((format!("Couldn't save the mark: {e:#}"), Instant::now()));
+        }
+        self.uploaded = uploaded::load();
+    }
+
+    /// The clip moved to `to` (renamed or replaced): its uploaded mark follows.
+    fn move_uploaded(&mut self, from: &Path, to: &Path) {
+        if let Err(e) = uploaded::rename(from, to) {
+            crate::log!("moving the uploaded mark of {} failed: {e:#}", from.display());
+        }
+        self.uploaded = uploaded::load();
     }
 
     /// Opens the Edit dialog to pick the part for the soundboard.
@@ -423,6 +456,8 @@ impl ClipsPage {
         if let Err(e) = volumes::set(path, Volumes::default()) {
             crate::log!("clearing the volumes of {} failed: {e:#}", path.display());
         }
+        // An uploaded mark moves to the new file.
+        self.move_uploaded(path, &new);
         self.volumes = volumes::load();
         self.last_scan = None; // show the new file now
         Ok(Some(format!("Discord-ready: {}. The original is in the Recycle Bin.", file_name(&new))))
@@ -546,6 +581,8 @@ struct Card {
     menu_open: bool,
     /// The clip has stored volumes other than 100%.
     custom_mix: bool,
+    /// The clip is marked as uploaded (#28).
+    uploaded: bool,
 }
 
 /// Draws one card and returns what the user clicked.
@@ -558,7 +595,7 @@ fn tile(
     editing: Option<&mut String>,
     today: i32,
 ) -> Option<Action> {
-    let Card { view, menu_open, custom_mix } = card_state;
+    let Card { view, menu_open, custom_mix, uploaded } = card_state;
     let id = ui.make_persistent_id(("clip", &clip.path));
     let card = ui.interact(rect, id, Sense::hover());
     let fill = if card.hovered() { mix(BG_SECONDARY, BG_HOVER, 0.6) } else { BG_SECONDARY };
@@ -701,6 +738,9 @@ fn tile(
         }
         _ => {}
     }
+    if uploaded {
+        detail.push_str(" · Uploaded");
+    }
     painter.text(pos2(inner.left(), title_y + 23.0), Align2::LEFT_TOP, detail, font(13.0, Weight::Regular), TEXT_MUTED);
 
     // Buttons.
@@ -734,7 +774,7 @@ fn tile(
     }
     if menu_open {
         let has_tracks = matches!(analysis, Some(Ok(a)) if a.channels == crate::clip::TRACK_CHANNELS);
-        if let Some(a) = card_menu(ui, id, &more, has_tracks) {
+        if let Some(a) = card_menu(ui, id, &more, has_tracks, uploaded) {
             action = Some(a);
         }
     }
@@ -761,7 +801,7 @@ fn more_button(ui: &mut Ui, open: bool) -> egui::Response {
 
 /// The ⋯ menu, opening below its button like Discord's context menus.
 /// Returns the picked item, or `CloseMenu` on a click outside it.
-fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool) -> Option<Action> {
+fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool, uploaded: bool) -> Option<Action> {
     use library::Tracks;
     let mut picked = None;
     // Groups, separated by a line: copying (for chats; clips with separate
@@ -771,8 +811,17 @@ fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool) -
         copy.push(("Copy Discord only", || Action::Copy(Tracks::Discord)));
         copy.push(("Copy mic only", || Action::Copy(Tracks::Mic)));
     }
-    let edit: Vec<(&str, fn() -> Action)> =
-        vec![("Edit…", || Action::Edit), ("Rename", || Action::StartRename), ("Show in Explorer", || Action::Show)];
+    let mark: (&str, fn() -> Action) = if uploaded {
+        ("Mark as not uploaded", || Action::SetUploaded(false))
+    } else {
+        ("Mark as uploaded", || Action::SetUploaded(true))
+    };
+    let edit: Vec<(&str, fn() -> Action)> = vec![
+        ("Edit…", || Action::Edit),
+        ("Rename", || Action::StartRename),
+        mark,
+        ("Show in Explorer", || Action::Show),
+    ];
     let groups = [copy, edit, vec![("Delete", || Action::Delete)]];
     let area = egui::Area::new(id.with("menu"))
         .order(egui::Order::Foreground)
