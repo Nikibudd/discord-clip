@@ -61,22 +61,56 @@ impl SettingsPage {
             set(Command::SetSeconds(secs.round() as u32));
         }
         ui.add_space(6.0);
-        let bytes = secs.round() as u64 * (crate::capture::SAMPLE_RATE as u64) * (crate::capture::CHANNELS as u64) * 2;
-        let mb = bytes as f32 / 1_000_000.0;
-        if bytes > 10 * 1024 * 1024 {
-            text(ui, format!("≈ {mb:.1} MB per clip: over Discord's 10 MB upload limit without Nitro."), 14.0, Weight::Regular, YELLOW);
+        // What's shared with Discord is always stereo; with separate tracks
+        // the file in the folder is twice that.
+        let shared = (secs.round() * cfg.format.stereo_bytes_per_sec()) as u64;
+        let on_disk = if cfg.separate_tracks && cfg.mic && cfg.format.dual_track() {
+            format!(" ({} in the folder with separate tracks)", size_text(shared * 2))
         } else {
-            text(ui, format!("≈ {mb:.1} MB per clip."), 14.0, Weight::Regular, TEXT_MUTED);
+            String::new()
+        };
+        let size = size_text(shared);
+        if shared > 10 * 1024 * 1024 {
+            text(
+                ui,
+                format!("≈ {size} per clip{on_disk}: over Discord's 10 MB upload limit without Nitro."),
+                14.0,
+                Weight::Regular,
+                YELLOW,
+            );
+        } else {
+            text(ui, format!("≈ {size} per clip{on_disk}."), 14.0, Weight::Regular, TEXT_MUTED);
         }
+
+        ui.add_space(24.0);
+        format_picker(ui, cfg);
 
         ui.add_space(24.0);
         let mic_desc = if snap.mic == "unavailable" {
             "Mix your own voice into clips. No microphone was found when the app started."
         } else {
-            "Mix your own voice (your default communications microphone) into clips. Applies after a restart."
+            "Mix your own voice into clips. Applies after a restart."
         };
         if row(ui, "Record my microphone", mic_desc, |ui| toggle(ui, cfg.mic)).clicked() {
             set(Command::SetMic(!cfg.mic));
+        }
+
+        ui.add_space(24.0);
+        mic_picker(ui, snap);
+
+        ui.add_space(24.0);
+        let dual = cfg.format.dual_track();
+        let tracks_desc = if !dual {
+            "MP3 can't hold separate tracks, so clips are saved as one mix. Pick Opus, FLAC or WAV to keep them apart."
+        } else if cfg.mic {
+            "Saves other people and your voice as separate tracks in each clip, so you can share just one of \
+             them later. Clips get about twice as big; copying a clip still gives Discord a normal mix."
+        } else {
+            "Only used while your microphone is recorded."
+        };
+        let tracks_toggle = |ui: &mut Ui| toggle_enabled(ui, cfg.separate_tracks && dual, dual);
+        if row(ui, "Keep Discord and mic as separate tracks", tracks_desc, tracks_toggle).clicked() && dual {
+            set(Command::SetSeparateTracks(!cfg.separate_tracks));
         }
 
         ui.add_space(24.0);
@@ -120,6 +154,30 @@ impl SettingsPage {
         .clicked()
         {
             set(Command::SetNotifications(!cfg.notifications));
+        }
+
+        divider(ui);
+
+        // Startup
+        section_label(ui, "Startup");
+        use crate::autostart::State;
+        let on = snap.autostart == State::On;
+        let other;
+        let desc = match &snap.autostart {
+            State::OtherCopy(path) => {
+                other = format!(
+                    "Windows currently starts a different copy: {}. Turn this on to start this one instead.",
+                    path.display()
+                );
+                other.as_str()
+            }
+            State::DisabledByWindows => {
+                "Switched off in Task Manager's Startup apps. Turn it on here to start Discord Clip again."
+            }
+            _ => "Start Discord Clip in the tray when you sign in, so it's always ready to save a clip.",
+        };
+        if row(ui, "Start with Windows", desc, |ui| toggle(ui, on)).clicked() {
+            set(Command::SetAutostart(!on));
         }
 
         divider(ui);
@@ -194,7 +252,7 @@ pub fn restart_bar(ui: &mut Ui) {
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                             text(
                                 ui,
-                                "Restart to apply your clip length and microphone changes.",
+                                "Restart to apply your recording changes.",
                                 15.0,
                                 Weight::Semibold,
                                 TEXT_NORMAL,
@@ -203,4 +261,92 @@ pub fn restart_bar(ui: &mut Ui) {
                     });
                 });
         });
+}
+
+/// "0.24 MB" below 1 MB (two decimals, so small formats don't all say
+/// "0.2 MB"), else "5.8 MB".
+fn size_text(bytes: u64) -> String {
+    let mb = bytes as f32 / 1_000_000.0;
+    if mb < 1.0 {
+        format!("{mb:.2} MB")
+    } else {
+        format!("{mb:.1} MB")
+    }
+}
+
+/// The Format dropdown (#8): each option says how big a 30 s clip gets, and
+/// badges mark the smallest and largest and the ones without separate tracks.
+fn format_picker(ui: &mut Ui, cfg: &Config) {
+    use crate::audio::Format;
+    text(ui, "Format", 16.0, Weight::Semibold, HEADER_PRIMARY);
+    ui.add_space(4.0);
+    text(
+        ui,
+        "What new clips are saved as. Opus and MP3 are small enough for long clips; FLAC and WAV keep every detail.",
+        14.0,
+        Weight::Regular,
+        HEADER_SECONDARY,
+    );
+    ui.add_space(8.0);
+    let options: Vec<String> = Format::ALL
+        .iter()
+        .map(|f| format!("{} · ≈ {} per 30 s", f.label(), size_text((30.0 * f.stereo_bytes_per_sec()) as u64)))
+        .collect();
+    let badges: Vec<Option<Badge>> = Format::ALL
+        .iter()
+        .map(|f| match f {
+            Format::Opus => Some(("Exceptionally small", GREEN_BTN)),
+            Format::Mp3Low | Format::Mp3High => Some(("No dual track", GRAY_BTN)),
+            Format::Wav => Some(("Exceptionally large", RED_BTN)),
+            Format::Flac => None,
+        })
+        .collect();
+    let selected = Format::ALL.iter().position(|f| *f == cfg.format);
+    let (_, picked) = dropdown_with_badges(ui, "clip-format", &options, &badges, selected, true);
+    if let Some(i) = picked {
+        if Some(i) != selected {
+            set(Command::SetFormat(Format::ALL[i]));
+        }
+    }
+}
+
+/// Which microphone to record: Windows' default communications device, or
+/// a specific one (kept even while it's unplugged).
+fn mic_picker(ui: &mut Ui, snap: &Snapshot) {
+    let cfg = &snap.cfg;
+    text(ui, "Microphone", 16.0, Weight::Semibold, HEADER_PRIMARY);
+    ui.add_space(4.0);
+    let (desc, color) = if snap.mic == "fallback" {
+        ("The selected microphone isn't connected, so your default communications microphone is recorded instead.", YELLOW)
+    } else {
+        ("The mic you talk into on Discord. Applies after a restart.", HEADER_SECONDARY)
+    };
+    text(ui, desc, 14.0, Weight::Regular, color);
+    ui.add_space(8.0);
+
+    let default_name = snap.mics.iter().find(|m| m.is_default).map(|m| m.name.as_str());
+    let mut options = vec![match default_name {
+        Some(name) => format!("Default communications device ({name})"),
+        None => "Default communications device".to_string(),
+    }];
+    let mut ids = vec![String::new()];
+    for m in &snap.mics {
+        options.push(m.name.clone());
+        ids.push(m.id.clone());
+    }
+    if !cfg.mic_device.is_empty() && !ids.contains(&cfg.mic_device) {
+        options.push("Selected microphone (not connected)".to_string());
+        ids.push(cfg.mic_device.clone());
+    }
+    let selected = ids.iter().position(|id| *id == cfg.mic_device);
+    let (resp, picked) = dropdown(ui, "mic-device", &options, selected, cfg.mic);
+    if resp.clicked() {
+        // Pick up mics plugged in since the list was read.
+        send(Command::RefreshMics);
+    }
+    if let Some(i) = picked {
+        if Some(i) != selected {
+            set(Command::SetMicDevice(ids[i].clone()));
+        }
+    }
 }

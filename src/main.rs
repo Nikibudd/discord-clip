@@ -12,6 +12,8 @@
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod audio;
+mod autostart;
 mod capture;
 mod clip;
 mod config;
@@ -24,6 +26,7 @@ mod ringbuffer;
 mod tray;
 mod ui;
 mod update;
+mod volumes;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,6 +50,7 @@ Runs in the system tray. Settings are read from
   -s, --seconds <N>    Length of each clip in seconds (1-300)
       --no-mic         Don't record your microphone, only other people
       --mic-gain <X>   Microphone volume multiplier (0-10)
+      --format <F>     Clip format: opus, mp3-128, mp3-192, flac or wav
   -o, --out <DIR>      Folder to save clips in
       --no-clipboard   Don't copy saved clips to the clipboard
       --no-notifications  Don't show a notification for each saved clip
@@ -66,6 +70,7 @@ fn parse_cli() -> Result<(Vec<(&'static str, String)>, bool)> {
             "-s" | "--seconds" => ("seconds", value(&arg)?),
             "--no-mic" => ("mic", "false".into()),
             "--mic-gain" => ("mic_gain", value(&arg)?),
+            "--format" => ("format", value(&arg)?),
             "-o" | "--out" => {
                 // Relative paths are relative to where you ran the command.
                 let p = std::path::absolute(value(&arg)?).context("bad --out path")?;
@@ -159,6 +164,12 @@ fn main() {
     };
 
     log::init();
+    // Release builds abort on panic without a trace (no console): write what
+    // and where to the log first.
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current().name().unwrap_or("?").to_string();
+        log!("crash in thread {thread}: {info}");
+    }));
     update::init();
     log!("discord-clip {} starting", env!("CARGO_PKG_VERSION"));
 
@@ -186,10 +197,23 @@ fn main() {
 
     let (mic_ring, mic_status) = if cfg.mic {
         let ring = Arc::new(RingBuffer::new(ring_len));
-        match capture::spawn(Source::Microphone, Arc::clone(&ring), Arc::clone(&running)) {
+        let chosen = Some(cfg.mic_device.clone()).filter(|id| !id.is_empty());
+        let mut status = "on";
+        let mut started = capture::spawn(Source::Microphone(chosen.clone()), Arc::clone(&ring), Arc::clone(&running));
+        if let (Err(e), Some(id)) = (&started, &chosen) {
+            // The picked mic is unplugged or gone: use the default for now
+            // (the setting is kept, so it's used again once it's back).
+            log!("microphone {id}: {e:#}; falling back to the default communications device");
+            status = "fallback";
+            started = capture::spawn(Source::Microphone(None), Arc::clone(&ring), Arc::clone(&running));
+        }
+        match started {
             Ok(_) => {
-                log!("microphone: capturing default communications device");
-                (Some(ring), "on".to_string())
+                match (&chosen, status) {
+                    (Some(id), "on") => log!("microphone: capturing {id}"),
+                    _ => log!("microphone: capturing default communications device"),
+                }
+                (Some(ring), status.to_string())
             }
             Err(e) => {
                 log!("microphone unavailable: {e:#}");

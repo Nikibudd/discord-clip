@@ -3,8 +3,9 @@
 //! * Per-process loopback (Windows 10 2004+ / build 19041+): taps only the
 //!   audio rendered by a given process tree, without touching the real output
 //!   device - Discord keeps playing to your speakers exactly as before.
-//! * Microphone: the default *communications* capture device, i.e. normally
-//!   the same mic you talk into on Discord.
+//! * Microphone: the one picked in Settings, or by default the default
+//!   *communications* capture device, i.e. normally the same mic you talk
+//!   into on Discord.
 //!
 //! Both streams are opened in one fixed format (`FORMAT`) with
 //! AUTOCONVERTPCM, so the two ring buffers line up sample-for-sample and can
@@ -119,12 +120,75 @@ fn wide_to_string(buf: &[u16]) -> String {
 // Capture stream
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Source {
     /// Everything the given process tree renders.
     ProcessLoopback(u32),
-    /// Default communications microphone.
-    Microphone,
+    /// A microphone by endpoint id, or `None` for the default
+    /// communications microphone.
+    Microphone(Option<String>),
+}
+
+impl Source {
+    /// Short name for thread names and the log.
+    fn label(&self) -> &'static str {
+        match self {
+            Source::ProcessLoopback(_) => "discord",
+            Source::Microphone(_) => "mic",
+        }
+    }
+}
+
+/// A capture device for the microphone picker.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mic {
+    /// Endpoint id: stable across restarts and renames; stored in config.
+    pub id: String,
+    /// "Microphone (Blue Yeti)"
+    pub name: String,
+    /// Currently the default communications microphone.
+    pub is_default: bool,
+}
+
+/// The active capture devices, default communications mic first.
+pub fn list_microphones() -> Result<Vec<Mic>> {
+    use windows::Win32::Media::Audio::DEVICE_STATE_ACTIVE;
+    use windows::Win32::System::Com::{CoTaskMemFree, STGM_READ};
+    use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
+    // PKEY_Device_FriendlyName (from functiondiscoverykeys_devpkey.h).
+    const FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
+        fmtid: windows::core::GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
+        pid: 14,
+    };
+    unsafe {
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let id_of = |device: &windows::Win32::Media::Audio::IMMDevice| -> Result<String> {
+            let p = device.GetId()?;
+            let s = p.to_string();
+            CoTaskMemFree(Some(p.0 as *const _));
+            Ok(s?)
+        };
+        let default_id = enumerator
+            .GetDefaultAudioEndpoint(eCapture, eCommunications)
+            .ok()
+            .and_then(|d| id_of(&d).ok());
+        let devices = enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)?;
+        let mut mics = Vec::new();
+        for i in 0..devices.GetCount()? {
+            let device = devices.Item(i)?;
+            let id = id_of(&device)?;
+            let name = device
+                .OpenPropertyStore(STGM_READ)
+                .and_then(|store| store.GetValue(&FRIENDLY_NAME))
+                .map(|v| v.to_string())
+                .ok()
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "Unknown microphone".to_string());
+            mics.push(Mic { is_default: default_id.as_deref() == Some(id.as_str()), id, name });
+        }
+        mics.sort_by_key(|m| !m.is_default);
+        Ok(mics)
+    }
 }
 
 /// Initializes COM (MTA) for the current thread. Safe to call repeatedly.
@@ -161,11 +225,12 @@ pub fn spawn(
     running: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<()>> {
     let (tx, rx) = sync_channel::<Result<()>>(1);
+    let label = source.label();
     let handle = std::thread::Builder::new()
-        .name(format!("capture-{source:?}"))
+        .name(format!("capture-{label}"))
         .spawn(move || {
             init_com();
-            let stream = match open(source) {
+            let stream = match open(&source) {
                 Ok(s) => {
                     let _ = tx.send(Ok(()));
                     s
@@ -176,7 +241,7 @@ pub fn spawn(
                 }
             };
             if let Err(e) = run(&stream, &ring, &running) {
-                crate::log!("[{source:?}] capture stopped: {e:#}");
+                crate::log!("[{label}] capture stopped: {e:#}");
             }
         })?;
     rx.recv()
@@ -184,15 +249,28 @@ pub fn spawn(
     Ok(handle)
 }
 
-fn open(source: Source) -> Result<Stream> {
+fn open(source: &Source) -> Result<Stream> {
     let audio_client = match source {
-        Source::ProcessLoopback(pid) => activate_process_loopback(pid)?,
-        Source::Microphone => unsafe {
+        Source::ProcessLoopback(pid) => activate_process_loopback(*pid)?,
+        Source::Microphone(id) => unsafe {
             let enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-            let device = enumerator
-                .GetDefaultAudioEndpoint(eCapture, eCommunications)
-                .context("no default communications microphone")?;
+            let device = match id {
+                Some(id) => {
+                    // A known but unplugged device is still found; it just
+                    // isn't active (and would record silence).
+                    let device = enumerator
+                        .GetDevice(&windows::core::HSTRING::from(id.as_str()))
+                        .context("the selected microphone isn't connected")?;
+                    if device.GetState()? != windows::Win32::Media::Audio::DEVICE_STATE_ACTIVE {
+                        return Err(anyhow!("the selected microphone isn't connected"));
+                    }
+                    device
+                }
+                None => enumerator
+                    .GetDefaultAudioEndpoint(eCapture, eCommunications)
+                    .context("no default communications microphone")?,
+            };
             device.Activate::<IAudioClient>(CLSCTX_ALL, None)?
         },
     };
@@ -424,4 +502,28 @@ pub enum DiscordStatus {
     Waiting,
     Capturing { pid: u32, exe: String },
     Failed(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Needs real audio devices: `cargo test -- --ignored microphones --nocapture`.
+    #[test]
+    #[ignore]
+    fn lists_microphones() {
+        init_com();
+        let mics = list_microphones().unwrap();
+        for m in &mics {
+            println!("{}{} [{}]", if m.is_default { "* " } else { "  " }, m.name, m.id);
+        }
+        assert!(!mics.is_empty(), "no active microphones");
+        assert!(mics[0].is_default, "default communications mic should be listed first");
+        // Every listed mic can be opened by id.
+        for m in &mics {
+            open(&Source::Microphone(Some(m.id.clone()))).unwrap_or_else(|e| panic!("{}: {e:#}", m.name));
+        }
+        // An id that doesn't exist fails cleanly (the app then falls back).
+        assert!(open(&Source::Microphone(Some("{0.0.1.00000000}.{00000000-0000-0000-0000-000000000000}".into()))).is_err());
+    }
 }

@@ -16,6 +16,7 @@ mod keybind;
 mod settings;
 mod sidebar;
 mod theme;
+mod trim;
 mod updates;
 mod widgets;
 
@@ -49,6 +50,10 @@ pub enum Command {
     EndHotkeyCapture(Option<Hotkey>),
     SetSeconds(u32),
     SetMic(bool),
+    /// Microphone endpoint id; empty = default communications device.
+    SetMicDevice(String),
+    /// Re-read the list of microphones (the picker was opened).
+    RefreshMics,
     SetMicGain(f32),
     SetClipboard(bool),
     SetNotifications(bool),
@@ -59,17 +64,23 @@ pub enum Command {
     /// Restart the app (re-reads the config file) and reopen this window.
     Restart,
     SetCheckUpdates(bool),
+    SetSeparateTracks(bool),
+    /// Format new clips are saved in (#8). Applies to the next clip.
+    SetFormat(crate::audio::Format),
     CheckUpdates,
     /// Download and install the update found by the last check.
     InstallUpdate,
     /// Open an https link in the browser.
     OpenUrl(String),
-    /// Copy a clip to the clipboard (to paste into Discord).
-    CopyClip(PathBuf),
+    /// Copy a clip to the clipboard (to paste into Discord). Clips with
+    /// separate tracks are copied as a stereo mix, or just one track.
+    CopyClip(PathBuf, crate::library::Tracks),
     /// Show a clip in Explorer.
     ShowClip(PathBuf),
     /// Move a clip to the Recycle Bin.
     DeleteClip(PathBuf),
+    /// Start this exe when signing in to Windows.
+    SetAutostart(bool),
 }
 
 /// Everything the window shows, published by the tray thread.
@@ -79,15 +90,20 @@ pub struct Snapshot {
     /// e.g. "Capturing Discord.exe (pid 1234)".
     pub discord: String,
     pub discord_active: bool,
-    /// "on", "off" or "unavailable".
+    /// "on", "off", "unavailable", or "fallback" (the picked mic isn't
+    /// connected, so the default one is recorded).
     pub mic: String,
     pub hotkey_registered: bool,
     pub hotkey_error: Option<String>,
     /// Clip length or microphone changed; they apply after a restart.
     pub restart_needed: bool,
+    /// Capture devices for the microphone picker.
+    pub mics: Vec<crate::capture::Mic>,
     pub update: crate::update::Status,
     /// Installed copy (updates via installer) rather than a portable exe.
     pub installed: bool,
+    /// "Start with Windows", read from the registry.
+    pub autostart: crate::autostart::State,
 }
 
 struct Shared {
@@ -260,7 +276,7 @@ impl ClipWindow {
     /// Closing only hides the window (winit can't create a second event loop).
     fn hide(&mut self) {
         self.settings.keybind.stop(None);
-        self.clips.stop();
+        self.clips.on_hide();
         if let Some(hwnd) = window_hwnd() {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
@@ -273,15 +289,20 @@ impl ClipWindow {
 /// for the tray thread to publish it back.
 fn set(cmd: Command) {
     {
-        let mut snap = shared().snapshot.lock().unwrap();
-        let cfg = &mut snap.cfg;
+        let snap = &mut *shared().snapshot.lock().unwrap();
         match &cmd {
-            Command::SetSeconds(s) => cfg.seconds = *s,
-            Command::SetMic(m) => cfg.mic = *m,
-            Command::SetMicGain(g) => cfg.mic_gain = *g,
-            Command::SetClipboard(c) => cfg.clipboard = *c,
-            Command::SetNotifications(n) => cfg.notifications = *n,
-            Command::SetCheckUpdates(c) => cfg.check_updates = *c,
+            Command::SetSeconds(s) => snap.cfg.seconds = *s,
+            Command::SetMic(m) => snap.cfg.mic = *m,
+            Command::SetMicDevice(id) => snap.cfg.mic_device = id.clone(),
+            Command::SetMicGain(g) => snap.cfg.mic_gain = *g,
+            Command::SetClipboard(c) => snap.cfg.clipboard = *c,
+            Command::SetNotifications(n) => snap.cfg.notifications = *n,
+            Command::SetCheckUpdates(c) => snap.cfg.check_updates = *c,
+            Command::SetSeparateTracks(s) => snap.cfg.separate_tracks = *s,
+            Command::SetFormat(f) => snap.cfg.format = *f,
+            Command::SetAutostart(on) => {
+                snap.autostart = if *on { crate::autostart::State::On } else { crate::autostart::State::Off }
+            }
             _ => {}
         }
     }

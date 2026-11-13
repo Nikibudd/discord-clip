@@ -25,7 +25,10 @@ pub(super) fn snapshot(app: &App) -> Snapshot {
     let (discord, discord_active) = discord_line(app);
     let cfg = app.cfg.borrow().clone();
     Snapshot {
-        restart_needed: cfg.seconds != app.running_seconds || cfg.mic != app.running_mic,
+        restart_needed: cfg.seconds != app.running_seconds
+            || cfg.mic != app.running_mic
+            || cfg.mic_device != app.running_mic_device,
+        mics: app.mics.borrow().clone(),
         cfg,
         discord: discord.trim_start_matches("Discord: ").to_string(),
         discord_active,
@@ -34,6 +37,7 @@ pub(super) fn snapshot(app: &App) -> Snapshot {
         hotkey_error: app.hotkey_error.borrow().clone(),
         update: update::status(),
         installed: update::is_installed(),
+        autostart: crate::autostart::state(),
     }
 }
 
@@ -82,9 +86,19 @@ pub(super) fn handle_ui_command(app: &App, cmd: Command) {
             update_settings(app, |c| c.mic = on);
             log!("microphone set to {on} (applies after restart)");
         }
+        Command::SetMicDevice(id) => {
+            log!("microphone device set to {:?} (applies after restart)", if id.is_empty() { "default" } else { &id });
+            update_settings(app, |c| c.mic_device = id.clone());
+        }
+        Command::RefreshMics => refresh_mics(app),
         Command::SetMicGain(g) => update_settings(app, |c| c.mic_gain = g.clamp(0.0, 10.0)),
         Command::SetClipboard(on) => update_settings(app, |c| c.clipboard = on),
         Command::SetNotifications(on) => update_settings(app, |c| c.notifications = on),
+        Command::SetSeparateTracks(on) => update_settings(app, |c| c.separate_tracks = on),
+        Command::SetFormat(f) => {
+            update_settings(app, |c| c.format = f);
+            log!("clip format set to {}", f.key());
+        }
         Command::PickFolder => change_folder(app),
         Command::OpenFolder => open_clips_folder(app),
         Command::OpenLog => shell_open(&log::log_path()),
@@ -115,13 +129,21 @@ pub(super) fn handle_ui_command(app: &App, cmd: Command) {
                 shell_open(Path::new(&url));
             }
         }
-        Command::CopyClip(path) => {
-            if let Err(e) = crate::clip::copy_file_to_clipboard(&path) {
+        Command::CopyClip(path, tracks) => {
+            let shared = crate::library::shareable_copy(&path, tracks, crate::volumes::get(&path));
+            if let Err(e) = shared.and_then(|p| crate::clip::copy_file_to_clipboard(&p)) {
                 log!("clipboard copy failed: {e:#}");
                 notify(app, "Couldn't copy the clip", &format!("{e:#}"), true);
             }
         }
         Command::ShowClip(path) => show_in_folder(&path),
+        Command::SetAutostart(on) => match crate::autostart::set(on) {
+            Ok(()) => log!("start with Windows: {on}"),
+            Err(e) => {
+                log!("{e:#}");
+                notify(app, "Couldn't change start with Windows", &format!("{e:#}"), true);
+            }
+        },
         Command::DeleteClip(path) => match crate::library::recycle(&path) {
             Ok(()) => log!("moved {} to the Recycle Bin", path.display()),
             Err(e) => {
@@ -188,5 +210,13 @@ pub(super) fn pick_folder(owner: HWND, current: &Path) -> anyhow::Result<Option<
         let path = name.to_string();
         CoTaskMemFree(Some(name.0 as *const c_void));
         Ok(Some(PathBuf::from(path?)))
+    }
+}
+
+/// Re-reads the capture devices for the microphone picker.
+pub(super) fn refresh_mics(app: &App) {
+    match crate::capture::list_microphones() {
+        Ok(mics) => *app.mics.borrow_mut() = mics,
+        Err(e) => log!("couldn't list microphones: {e:#}"),
     }
 }

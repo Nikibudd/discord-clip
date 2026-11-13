@@ -7,7 +7,12 @@ you press the hotkey (**Ctrl+Alt+C** by default).
 - **Other people:** captured with per-process WASAPI loopback of the Discord
   client, so only Discord audio is recorded (no game/music/browser audio).
   Discord keeps playing to your speakers as normal.
-- **You:** your default *communications* microphone is mixed in.
+- **You:** your microphone is mixed in: by default Windows' default *communications* mic, or the one you pick in Settings.
+- **Separate tracks** (on by default): each clip keeps Discord and your mic as
+  separate tracks in one 4-channel WAV (labelled quad, so players that open it
+  directly mix it to stereo). Copying a clip still gives Discord a normal stereo
+  mix; the ⋯ menu can also copy just Discord or just your mic. About twice the
+  file size.
 - The saved clip is copied to the clipboard as a file, so **Ctrl+V in a Discord
   chat** attaches it. A notification confirms it; click it to show the file.
 - Clips are 16-bit 48 kHz stereo: 30 s is about 5.8 MB, under Discord's 10 MB
@@ -26,12 +31,16 @@ window with a sidebar of pages. Closing it just hides it again.
 - **Clips** (the page it opens on): every clip in the clips folder as a card
   with its waveform, date, length and size, newest first. The play button
   plays/pauses; click or drag on the waveform to scrub (playhead, time under
-  the mouse). **Copy** puts it on the clipboard for Ctrl+V in Discord,
-  **Show** opens it in Explorer, **Delete** moves it to the Recycle Bin. New
-  clips appear on their own.
+  the mouse). Click a title (or **⋯ → Rename**) to **rename** the clip (the file keeps its
+  timestamp: `discord_clip_20261109_213151 Bob laughs.wav`), and use the
+  **search** box to filter by name or date. **Copy** puts it on the clipboard
+  for Ctrl+V in Discord. The **⋯** menu has **Trim…** (a dialog to cut out the
+  part you want: save it as a new clip, replace the original, or copy just that
+  part for Discord), **Rename**, **Show in Explorer** and **Delete** (to the
+  Recycle Bin). New clips appear on their own.
 - **Settings**: hotkey recorder (combos already taken by another app are
-  rejected), clip length, microphone on/off and volume, clips folder,
-  clipboard and notification toggles, and buttons to open/reload
+  rejected), clip length, microphone on/off, which mic (falls back to the default if it's unplugged) and its volume, clips folder,
+  clipboard and notification toggles, **Start with Windows**, and buttons to open/reload
   `config.ini` and the log. Changes save immediately. Clip length and the
   microphone switch apply after a restart; a bar offers to do that for you.
 - **Updates**: current version, "Check for updates", and **Update now** when
@@ -53,8 +62,8 @@ installed until you click **Update now**:
   swaps it in for the running file (the old one is kept as `.old` until the
   next start) and restarts.
 
-The first start after an update shows a "Discord Clip updated to X"
-notification.
+The first start after an update opens the window on the Updates page with an
+"Updated from X to Y" banner (and a "What's new" link), plus a notification.
 
 ## Tray menu
 
@@ -75,6 +84,8 @@ hotkey = Ctrl+Alt+C          # e.g. Ctrl+Shift+F9, F9, Win+Alt+R, Ctrl+Numpad0
 seconds = 30                 # 1-300
 mic = true
 mic_gain = 1
+mic_device =                 # empty = default communications mic; set from the app
+separate_tracks = true       # Discord + mic as separate tracks (4-channel clips)
 out_dir = C:\Users\you\Music\Discord Clips   # full path; %USERPROFILE% etc. allowed
 clipboard = true
 notifications = true
@@ -167,6 +178,7 @@ it from the tray before copying a new build over it).
 | `src/tray/` | The tray app (main thread): `mod.rs` app state + message loop, `notify_icon.rs` tray icon/tooltip/notifications, `menu.rs` right-click menu, `global_hotkey.rs` save-clip hotkey, `actions.rs` saving clips + opening folders, `window.rs` snapshot/commands for the window, folder picker, update hand-off |
 | `src/ui/` | The window (egui, own thread): `mod.rs` command/snapshot API + window lifecycle, `theme.rs` Discord colors/fonts, `widgets.rs` buttons/toggles/sliders, `sidebar.rs`, `keybind.rs` hotkey recorder, one file per page (`clips.rs`, `settings.rs`, `updates.rs`) |
 | `src/icon.rs` | The app icon, drawn at runtime (tray + window) |
+| `src/autostart.rs` | "Start with Windows": the `Discord Clip` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (same as the installer), incl. Task Manager's Startup apps switch |
 | `src/update.rs` | Update checks and in-app updates: fetches `latest.json` over WinHTTP, downloads + SHA-256-verifies the installer or portable exe, hands over to it |
 | `src/config.rs` | `config.ini` load/save/validation |
 | `src/hotkey.rs` | Parsing/formatting `Ctrl+Alt+C`-style hotkeys |

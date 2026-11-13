@@ -103,6 +103,9 @@ pub struct App {
     /// changing them needs a restart.
     running_seconds: u32,
     running_mic: bool,
+    running_mic_device: String,
+    /// Capture devices for the microphone picker (refreshed on demand).
+    mics: RefCell<Vec<crate::capture::Mic>>,
     hwnd: Cell<HWND>,
     hotkey_registered: Cell<bool>,
     /// Why the last hotkey change from the window failed.
@@ -133,6 +136,8 @@ impl App {
         App {
             running_seconds: cfg.seconds,
             running_mic: cfg.mic,
+            running_mic_device: cfg.mic_device.clone(),
+            mics: RefCell::new(Vec::new()),
             cfg: RefCell::new(cfg),
             file_cfg: RefCell::new(file_cfg),
             discord_ring,
@@ -207,8 +212,12 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
 
         tray_add(&app);
         register_hotkey(&app);
+        window::refresh_mics(&app);
 
         let updated_from = crate::update::note_version();
+        // First start after an update (from the window, or a newer installer
+        // run by hand): open the window so the user sees it worked.
+        let reopen = updated_from.is_some();
         let warnings = app.startup_warnings.join("\n");
         if !warnings.is_empty() {
             notify(&app, "Discord Clip: check your settings", &warnings, true);
@@ -220,7 +229,7 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
                 &format!("Discord Clip updated to {}", crate::update::CURRENT),
                 &format!("Updated from {prev}. Click to see the release notes."),
             );
-        } else if app.hotkey_registered.get() && !app.open_window {
+        } else if app.hotkey_registered.get() && !app.open_window && !reopen {
             let cfg = app.cfg.borrow().clone();
             notify(
                 &app,
@@ -229,7 +238,10 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
                 false,
             );
         }
-        if app.open_window {
+        if reopen {
+            log!("reopening the window after the update");
+            ui::open_page(snapshot(&app), ui::Page::Updates);
+        } else if app.open_window {
             ui::open(snapshot(&app));
         }
 

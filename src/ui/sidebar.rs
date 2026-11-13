@@ -83,6 +83,7 @@ fn status_panel(ui: &mut Ui, snap: &Snapshot, icons: &Icons) {
     let mic = match snap.mic.as_str() {
         "on" => "mic on",
         "off" => "mic off",
+        "fallback" => "default mic",
         _ => "mic unavailable",
     };
     painter.text(
