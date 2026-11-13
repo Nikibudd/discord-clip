@@ -59,7 +59,19 @@ pub fn button_sized(ui: &mut Ui, label: &str, kind: ButtonKind, height: f32) -> 
 
 /// Discord's pill switch, with a check / cross in the knob.
 pub fn toggle(ui: &mut Ui, on: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 24.0), Sense::click());
+    toggle_enabled(ui, on, true)
+}
+
+/// A toggle that can be greyed out: dimmed, and clicks do nothing.
+pub fn toggle_enabled(ui: &mut Ui, on: bool, enabled: bool) -> egui::Response {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 24.0), sense);
+    if !enabled {
+        ui.painter().rect_filled(rect, CornerRadius::same(12), GRAY_BTN);
+        let c = pos2(rect.left() + 12.0, rect.center().y);
+        ui.painter().circle_filled(c, 9.0, TEXT_MUTED);
+        return resp;
+    }
     let t = ui.ctx().animate_bool_responsive(resp.id, on);
     let bg = mix(TOGGLE_OFF, GREEN, t);
     let painter = ui.painter();
@@ -171,6 +183,23 @@ pub fn dropdown(
     selected: Option<usize>,
     enabled: bool,
 ) -> (egui::Response, Option<usize>) {
+    dropdown_with_badges(ui, id_salt, options, &[], selected, enabled)
+}
+
+/// A small colored pill with a label, like Discord's "NEW" tags.
+pub type Badge = (&'static str, Color32);
+
+/// Like `dropdown`, with an optional badge at the right of each option
+/// (`badges[i]` for `options[i]`; missing entries have none).
+pub fn dropdown_with_badges(
+    ui: &mut Ui,
+    id_salt: &str,
+    options: &[String],
+    badges: &[Option<Badge>],
+    selected: Option<usize>,
+    enabled: bool,
+) -> (egui::Response, Option<usize>) {
+    let badge_of = |i: usize| badges.get(i).copied().flatten();
     let id = ui.make_persistent_id(id_salt);
     let mut open = enabled && ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
     let sense = if enabled { Sense::click() } else { Sense::hover() };
@@ -189,16 +218,31 @@ pub fn dropdown(
     }
     let label = selected.and_then(|i| options.get(i)).map(String::as_str).unwrap_or("");
     let color = if enabled { TEXT_NORMAL } else { TEXT_MUTED };
-    let text_rect = Rect::from_min_max(rect.min + vec2(12.0, 0.0), rect.max - vec2(36.0, 0.0));
+    let mut text_rect = Rect::from_min_max(rect.min + vec2(12.0, 0.0), rect.max - vec2(36.0, 0.0));
+    if let Some(b) = selected.and_then(badge_of) {
+        let left = badge(painter, b, pos2(text_rect.right(), rect.center().y));
+        text_rect.set_right(left - 8.0);
+    }
     let galley = one_line(ui, label, font(15.0, Weight::Regular), color, text_rect.width());
     painter.galley(pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0), galley, color);
     chevron(painter, pos2(rect.right() - 18.0, rect.center().y), open, color);
 
     let mut picked = None;
     if open {
+        // Open upwards when the list doesn't fit below the box (otherwise
+        // egui pushes it up over the box itself).
+        let list_height = options.len() as f32 * 38.0 + 10.0;
+        let screen = ui.ctx().content_rect();
+        let upwards = rect.bottom() + 4.0 + list_height > screen.bottom() && rect.top() - 4.0 - list_height >= screen.top();
+        let (pivot, at) = if upwards {
+            (egui::Align2::LEFT_BOTTOM, rect.left_top() - vec2(0.0, 4.0))
+        } else {
+            (egui::Align2::LEFT_TOP, rect.left_bottom() + vec2(0.0, 4.0))
+        };
         let popup = egui::Area::new(id.with("popup"))
             .order(egui::Order::Foreground)
-            .fixed_pos(rect.left_bottom() + vec2(0.0, 4.0))
+            .pivot(pivot)
+            .fixed_pos(at)
             .show(ui.ctx(), |ui| {
                 egui::Frame::new()
                     .fill(BG_SECONDARY_ALT)
@@ -220,7 +264,11 @@ pub fn dropdown(
                             };
                             ui.painter().rect_filled(r, CornerRadius::same(3), fill);
                             let color = if is_selected || row.hovered() { Color32::WHITE } else { TEXT_NORMAL };
-                            let galley = one_line(ui, option, font(15.0, Weight::Regular), color, r.width() - 44.0);
+                            let mut text_right = r.right() - 34.0;
+                            if let Some(b) = badge_of(i) {
+                                text_right = badge(ui.painter(), b, pos2(text_right, r.center().y)) - 8.0;
+                            }
+                            let galley = one_line(ui, option, font(15.0, Weight::Regular), color, text_right - r.left() - 10.0);
                             ui.painter().galley(pos2(r.left() + 10.0, r.center().y - galley.size().y / 2.0), galley, color);
                             if is_selected {
                                 // Blurple circle with a check, like Discord's selected option.
@@ -243,6 +291,16 @@ pub fn dropdown(
     }
     ui.data_mut(|d| d.insert_temp(id, open));
     (resp, picked)
+}
+
+/// Draws a badge whose right edge is at `right_center`; returns its left edge.
+fn badge(painter: &egui::Painter, (label, color): Badge, right_center: egui::Pos2) -> f32 {
+    let galley = painter.layout_no_wrap(label.to_uppercase(), font(11.0, Weight::Bold), Color32::WHITE);
+    let size = galley.size() + vec2(12.0, 4.0);
+    let rect = Rect::from_min_size(pos2(right_center.x - size.x, right_center.y - size.y / 2.0), size);
+    painter.rect_filled(rect, CornerRadius::same(4), color);
+    painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    rect.left()
 }
 
 /// A single line of text, cut off with "…" if wider than `max_width`.

@@ -65,6 +65,8 @@ pub enum Command {
     Restart,
     SetCheckUpdates(bool),
     SetSeparateTracks(bool),
+    /// Format new clips are saved in (#8). Applies to the next clip.
+    SetFormat(crate::audio::Format),
     CheckUpdates,
     /// Download and install the update found by the last check.
     InstallUpdate,
@@ -297,6 +299,7 @@ fn set(cmd: Command) {
             Command::SetNotifications(n) => snap.cfg.notifications = *n,
             Command::SetCheckUpdates(c) => snap.cfg.check_updates = *c,
             Command::SetSeparateTracks(s) => snap.cfg.separate_tracks = *s,
+            Command::SetFormat(f) => snap.cfg.format = *f,
             Command::SetAutostart(on) => {
                 snap.autostart = if *on { crate::autostart::State::On } else { crate::autostart::State::Off }
             }

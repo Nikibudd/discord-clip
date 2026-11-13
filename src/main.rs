@@ -12,6 +12,7 @@
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod audio;
 mod autostart;
 mod capture;
 mod clip;
@@ -49,6 +50,7 @@ Runs in the system tray. Settings are read from
   -s, --seconds <N>    Length of each clip in seconds (1-300)
       --no-mic         Don't record your microphone, only other people
       --mic-gain <X>   Microphone volume multiplier (0-10)
+      --format <F>     Clip format: opus, mp3-128, mp3-192, flac or wav
   -o, --out <DIR>      Folder to save clips in
       --no-clipboard   Don't copy saved clips to the clipboard
       --no-notifications  Don't show a notification for each saved clip
@@ -68,6 +70,7 @@ fn parse_cli() -> Result<(Vec<(&'static str, String)>, bool)> {
             "-s" | "--seconds" => ("seconds", value(&arg)?),
             "--no-mic" => ("mic", "false".into()),
             "--mic-gain" => ("mic_gain", value(&arg)?),
+            "--format" => ("format", value(&arg)?),
             "-o" | "--out" => {
                 // Relative paths are relative to where you ran the command.
                 let p = std::path::absolute(value(&arg)?).context("bad --out path")?;

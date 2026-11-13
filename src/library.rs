@@ -8,12 +8,13 @@ use std::time::SystemTime;
 use anyhow::{bail, Context, Result};
 use windows::core::PCWSTR;
 
+use crate::audio::{Audio, Format};
 use crate::volumes::Volumes;
 
 /// Number of bars in a clip's waveform.
 pub const WAVEFORM_BARS: usize = 48;
 
-/// A WAV file in the clips folder (cheap to get: no file contents read).
+/// A clip file in the clips folder (cheap to get: no file contents read).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipFile {
     pub path: PathBuf,
@@ -47,12 +48,16 @@ pub struct Analysis {
     pub channels: u16,
 }
 
-/// Lists the `.wav` files in `dir`, newest first.
+/// Lists the clips (`.wav`, `.ogg`, `.flac`, `.mp3`) in `dir`, newest first.
 pub fn scan(dir: &Path) -> Vec<ClipFile> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut clips: Vec<ClipFile> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("wav")))
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|x| crate::audio::EXTENSIONS.iter().any(|ext| x.eq_ignore_ascii_case(ext)))
+        })
         // Skip our own temporary files (e.g. while replacing a clip with a trim).
         .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
         .filter_map(|e| {
@@ -152,6 +157,20 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
 /// Like `analyze`, with `bars` waveform bars (e.g. more for the trim view).
 pub fn analyze_bars(path: &Path, bars: usize) -> Result<Analysis> {
     let bars = bars.max(1);
+    if Format::of_path(path) != Some(Format::Wav) {
+        // Compressed clips are small: decode them whole.
+        let audio = crate::audio::read(path)?;
+        let channels = audio.channels.max(1) as usize;
+        let frames = audio.frames();
+        let mut peaks = vec![0f32; bars];
+        for (i, s) in audio.samples.iter().enumerate() {
+            let bar = (i / channels) * bars / frames.max(1);
+            let p = &mut peaks[bar.min(bars - 1)];
+            *p = p.max(s.abs());
+        }
+        return Ok(Analysis { seconds: audio.seconds(), peaks: normalize(peaks), channels: audio.channels });
+    }
+    // WAV: stream it, without holding a long clip in memory.
     let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
     let spec = reader.spec();
     let frames = reader.duration() as usize;
@@ -198,26 +217,49 @@ fn normalize(mut peaks: Vec<f32>) -> Vec<f32> {
 /// Fade at each cut of a trimmed clip, so it doesn't start or end with a click.
 const TRIM_FADE_SECS: f32 = 0.01;
 
-/// Writes the part of `src` between `start` and `end` (0..=1 of its length)
-/// to `dest`, in the same WAV format (sample rate, channels, bit depth), with
-/// a short fade at both cuts.
-pub fn write_trimmed(src: &Path, start: f32, end: f32, dest: &Path) -> Result<()> {
-    let mut reader = hound::WavReader::open(src).with_context(|| format!("opening {}", src.display()))?;
-    let spec = reader.spec();
-    let channels = spec.channels.max(1) as usize;
-    let frames = reader.duration() as usize;
+/// The frames `first..last` that `start..end` (0..=1) selects, and a gain per
+/// frame that fades in and out at the cuts.
+fn trim_range(frames: usize, rate: u32, start: f32, end: f32) -> Result<(usize, usize, impl Fn(usize) -> f32)> {
     let (start, end) = (start.clamp(0.0, 1.0), end.clamp(0.0, 1.0));
     let first = (start * frames as f32) as usize;
     let last = ((end * frames as f32) as usize).min(frames);
     if last <= first {
         bail!("nothing selected");
     }
-    let fade = ((TRIM_FADE_SECS * spec.sample_rate as f32) as usize).min((last - first) / 2).max(1);
-    let gain = |frame: usize| -> f32 {
+    let fade = ((TRIM_FADE_SECS * rate as f32) as usize).min((last - first) / 2).max(1);
+    let gain = move |frame: usize| -> f32 {
         let from_start = frame - first;
         let to_end = last - 1 - frame;
         (from_start.min(to_end) as f32 / fade as f32).min(1.0)
     };
+    Ok((first, last, gain))
+}
+
+/// The part of `audio` between `start` and `end` (0..=1), faded at the cuts.
+fn trimmed(audio: &Audio, start: f32, end: f32) -> Result<Audio> {
+    let ch = audio.channels.max(1) as usize;
+    let (first, last, gain) = trim_range(audio.frames(), audio.rate, start, end)?;
+    let samples = audio.samples[first * ch..last * ch]
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| s * gain(first + i / ch))
+        .collect();
+    Ok(Audio { samples, channels: audio.channels, rate: audio.rate })
+}
+
+/// Writes the part of `src` between `start` and `end` (0..=1 of its length)
+/// to `dest` in the same format (for WAV: sample rate, channels and bit
+/// depth too), with a short fade at both cuts.
+pub fn write_trimmed(src: &Path, start: f32, end: f32, dest: &Path) -> Result<()> {
+    if Format::of_path(src) != Some(Format::Wav) {
+        let audio = crate::audio::read(src)?;
+        let format = Format::for_copy_of(src, &audio)?;
+        return crate::audio::write(dest, &trimmed(&audio, start, end)?, format);
+    }
+    let mut reader = hound::WavReader::open(src).with_context(|| format!("opening {}", src.display()))?;
+    let spec = reader.spec();
+    let channels = spec.channels.max(1) as usize;
+    let (first, last, gain) = trim_range(reader.duration() as usize, spec.sample_rate, start, end)?;
     let mut writer = hound::WavWriter::create(dest, spec).with_context(|| format!("writing {}", dest.display()))?;
     // Seek to the first frame instead of reading everything before it.
     reader.seek(first as u32)?;
@@ -261,7 +303,8 @@ pub fn save_trimmed_copy(src: &Path, start: f32, end: f32) -> Result<PathBuf> {
 /// Recycle Bin, so this can be undone.
 pub fn replace_with_trimmed(src: &Path, start: f32, end: f32) -> Result<()> {
     let dir = src.parent().context("clip has no folder")?;
-    let tmp = dir.join(format!(".trimming-{}.wav", std::process::id()));
+    let ext = src.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "wav".into());
+    let tmp = dir.join(format!(".trimming-{}.{ext}", std::process::id()));
     write_trimmed(src, start, end, &tmp)?;
     if let Err(e) = recycle(src) {
         let _ = std::fs::remove_file(&tmp);
@@ -276,13 +319,14 @@ pub fn replace_with_trimmed(src: &Path, start: f32, end: f32) -> Result<()> {
 pub fn trimmed_temp_copy(src: &Path, start: f32, end: f32, volumes: Volumes) -> Result<PathBuf> {
     let dir = std::env::temp_dir().join("discord-clip-trimmed");
     std::fs::create_dir_all(&dir)?;
-    let trimmed = dir.join(format!(".trimmed-{}.wav", std::process::id()));
-    write_trimmed(src, start, end, &trimmed)?;
-    // Discord gets a normal stereo mix, named like the clip.
+    // Discord gets a normal stereo mix in the clip's format, named like the
+    // clip. Trimmed and mixed in memory, so it's encoded only once.
     let dest = dir.join(src.file_name().context("clip has no file name")?);
-    let (samples, rate) = read_stereo(&trimmed, Tracks::Both, volumes)?;
-    let _ = std::fs::remove_file(&trimmed);
-    write_stereo(&dest, &samples, rate)?;
+    let audio = crate::audio::read(src)?;
+    let format = Format::for_copy_of(src, &audio)?;
+    let part = trimmed(&audio, start, end)?;
+    let stereo = Audio { samples: to_stereo(&part, Tracks::Both, volumes), channels: 2, rate: part.rate };
+    crate::audio::write(&dest, &stereo, format)?;
     Ok(dest)
 }
 
@@ -314,47 +358,34 @@ impl Tracks {
 /// the first two channels. `tracks` and `volumes` only matter for 4-channel
 /// clips.
 pub fn read_stereo(path: &Path, tracks: Tracks, volumes: Volumes) -> Result<(Vec<f32>, u32)> {
-    let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let spec = reader.spec();
-    let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<_, _>>()?,
-        hound::SampleFormat::Int => {
-            let scale = 1.0 / (1u64 << (spec.bits_per_sample.clamp(1, 32) - 1)) as f32;
-            reader.samples::<i32>().map(|s| s.map(|v| v as f32 * scale)).collect::<Result<_, _>>()?
-        }
-    };
-    let channels = spec.channels.max(1) as usize;
+    let audio = crate::audio::read(path)?;
+    Ok((to_stereo(&audio, tracks, volumes), audio.rate))
+}
+
+/// `audio` as interleaved stereo; see `read_stereo`.
+fn to_stereo(audio: &Audio, tracks: Tracks, volumes: Volumes) -> Vec<f32> {
     let (d, m) = tracks.gains(volumes);
-    let out = match channels {
-        1 => samples.iter().flat_map(|&s| [s, s]).collect(),
-        2 => samples,
-        4 => samples
+    match audio.channels.max(1) as usize {
+        1 => audio.samples.iter().flat_map(|&s| [s, s]).collect(),
+        2 => audio.samples.clone(),
+        4 => audio
+            .samples
             .chunks_exact(4)
             .flat_map(|f| [(f[0] * d + f[2] * m).clamp(-1.0, 1.0), (f[1] * d + f[3] * m).clamp(-1.0, 1.0)])
             .collect(),
-        n => samples.chunks_exact(n).flat_map(|f| [f[0], f[1]]).collect(),
-    };
-    Ok((out, spec.sample_rate))
-}
-
-fn write_stereo(path: &Path, samples: &[f32], rate: u32) -> Result<()> {
-    let spec = hound::WavSpec { channels: 2, sample_rate: rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
-    let mut w = hound::WavWriter::create(path, spec).with_context(|| format!("writing {}", path.display()))?;
-    for &s in samples {
-        w.write_sample((s * 32767.0).round() as i16)?;
+        n => audio.samples.chunks_exact(n).flat_map(|f| [f[0], f[1]]).collect(),
     }
-    w.finalize()?;
-    Ok(())
 }
 
-/// Number of channels in a WAV file (4 = separate tracks).
+/// Number of channels in a clip (4 = separate tracks).
 pub fn channels(path: &Path) -> Result<u16> {
-    Ok(hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?.spec().channels)
+    crate::audio::channels(path)
 }
 
 /// The file to hand to Discord (clipboard): the clip itself if it's a normal
 /// stereo clip, otherwise a stereo mix (or one track) at the clip's
-/// `volumes`, written to a temporary file named like the clip.
+/// `volumes`, in the clip's format, written to a temporary file named like
+/// the clip.
 pub fn shareable_copy(src: &Path, tracks: Tracks, volumes: Volumes) -> Result<PathBuf> {
     if channels(src)? <= 2 {
         return Ok(src.to_path_buf());
@@ -362,14 +393,17 @@ pub fn shareable_copy(src: &Path, tracks: Tracks, volumes: Volumes) -> Result<Pa
     let dir = std::env::temp_dir().join("discord-clip-share");
     std::fs::create_dir_all(&dir)?;
     let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = src.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "wav".into());
     let name = match tracks {
-        Tracks::Both => format!("{stem}.wav"),
-        Tracks::Discord => format!("{stem} (Discord only).wav"),
-        Tracks::Mic => format!("{stem} (mic only).wav"),
+        Tracks::Both => format!("{stem}.{ext}"),
+        Tracks::Discord => format!("{stem} (Discord only).{ext}"),
+        Tracks::Mic => format!("{stem} (mic only).{ext}"),
     };
     let dest = dir.join(name);
-    let (samples, rate) = read_stereo(src, tracks, volumes)?;
-    write_stereo(&dest, &samples, rate)?;
+    let audio = crate::audio::read(src)?;
+    let format = Format::for_copy_of(src, &audio)?;
+    let stereo = Audio { samples: to_stereo(&audio, tracks, volumes), channels: 2, rate: audio.rate };
+    crate::audio::write(&dest, &stereo, format)?;
     Ok(dest)
 }
 
@@ -553,6 +587,52 @@ mod tests {
         let trimmed = save_trimmed_copy(&src, 0.0, 0.5).unwrap();
         assert_eq!(channels(&trimmed).unwrap(), 4);
         assert_eq!(channels(&trimmed_temp_copy(&src, 0.0, 0.5, Volumes::default()).unwrap()).unwrap(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #8: Opus and FLAC clips with separate tracks are listed, analysed,
+    /// trimmed and shared like WAV ones, staying in their own format.
+    #[test]
+    fn compressed_clips_work_like_wav() {
+        let dir = std::env::temp_dir().join(format!("discord-clip-formats-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 1 s, 4 channels: a tone on Discord, silence on the mic.
+        let samples: Vec<f32> = (0..48_000)
+            .flat_map(|i| {
+                let s = 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48_000.0).sin();
+                [s, s, 0.0, 0.0]
+            })
+            .collect();
+        let audio = Audio { samples, channels: 4, rate: 48_000 };
+        for format in [Format::Opus, Format::Flac] {
+            let ext = format.extension();
+            let src = dir.join(format!("discord_clip_20261113_101500 Bob.{ext}"));
+            crate::audio::write(&src, &audio, format).unwrap();
+
+            let a = analyze(&src).unwrap();
+            assert_eq!(a.channels, 4, "{format:?}");
+            assert!((a.seconds - 1.0).abs() < 0.01, "{format:?} {}", a.seconds);
+
+            let copy = save_trimmed_copy(&src, 0.25, 0.75).unwrap();
+            assert_eq!(copy.extension().unwrap(), ext);
+            let t = crate::audio::read(&copy).unwrap();
+            assert_eq!((t.channels, t.frames()), (4, 24_000), "{format:?}");
+
+            // Discord gets stereo in the same format; muting Discord leaves silence.
+            let shared = shareable_copy(&src, Tracks::Both, Volumes::default()).unwrap();
+            assert_eq!(shared.extension().unwrap(), ext);
+            assert_eq!(channels(&shared).unwrap(), 2);
+            let muted = shareable_copy(&src, Tracks::Both, Volumes { discord: 0.0, mic: 1.0 }).unwrap();
+            let quiet = crate::audio::read(&muted).unwrap();
+            assert!(quiet.samples.iter().all(|s| s.abs() < 0.01), "{format:?}");
+            let tmp = trimmed_temp_copy(&src, 0.0, 0.5, Volumes::default()).unwrap();
+            assert_eq!((tmp.extension().unwrap().to_str().unwrap(), channels(&tmp).unwrap()), (ext, 2));
+        }
+        // Both formats show up on the Clips page, temporary files don't.
+        std::fs::write(dir.join(".discord_clip_x.ogg.part"), b"x").unwrap();
+        let listed: Vec<String> = scan(&dir).iter().map(|c| c.path.extension().unwrap().to_string_lossy().into_owned()).collect();
+        assert!(listed.contains(&"ogg".to_string()) && listed.contains(&"flac".to_string()), "{listed:?}");
+        assert!(scan(&dir).iter().all(|c| !c.path.to_string_lossy().contains(".part")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

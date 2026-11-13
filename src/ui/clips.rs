@@ -29,9 +29,6 @@ const RESCAN_EVERY: Duration = Duration::from_secs(2);
 const TILE_MIN_WIDTH: f32 = 250.0;
 const TILE_HEIGHT: f32 = 186.0;
 const GAP: f32 = 16.0;
-/// Bytes per second of our clips (48 kHz, stereo, 16-bit), to estimate
-/// length before a clip is analysed.
-const BYTES_PER_SEC: f32 = 48_000.0 * 2.0 * 2.0;
 
 type Analyses = Arc<Mutex<HashMap<PathBuf, (SystemTime, Result<Analysis, String>)>>>;
 
@@ -543,7 +540,11 @@ fn tile(
     let mut action = None;
     let seconds = match analysis {
         Some(Ok(a)) => a.seconds,
-        _ => clip.size as f32 / BYTES_PER_SEC,
+        // Until it's analysed: a rough guess from the file size and format.
+        _ => {
+            let rate = crate::audio::Format::of_path(&clip.path).map_or(192_000.0, |f| f.stereo_bytes_per_sec());
+            clip.size as f32 / rate
+        }
     };
 
     // Player: play/pause button and the waveform to scrub on.

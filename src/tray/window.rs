@@ -95,6 +95,10 @@ pub(super) fn handle_ui_command(app: &App, cmd: Command) {
         Command::SetClipboard(on) => update_settings(app, |c| c.clipboard = on),
         Command::SetNotifications(on) => update_settings(app, |c| c.notifications = on),
         Command::SetSeparateTracks(on) => update_settings(app, |c| c.separate_tracks = on),
+        Command::SetFormat(f) => {
+            update_settings(app, |c| c.format = f);
+            log!("clip format set to {}", f.key());
+        }
         Command::PickFolder => change_folder(app),
         Command::OpenFolder => open_clips_folder(app),
         Command::OpenLog => shell_open(&log::log_path()),
