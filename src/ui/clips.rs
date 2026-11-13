@@ -1,6 +1,6 @@
 //! The Clips page: the clips folder as a grid of cards, each with a
 //! waveform player (play/pause, click or drag on the waveform to scrub) and
-//! Copy / Show / Delete buttons.
+//! a Make Discord-ready button and a ⋯ menu (Copy, Trim, Rename, ...).
 //!
 //! Listing the folder is cheap and redone every couple of seconds while the
 //! page is open, so new clips appear on their own. Reading a clip's waveform
@@ -82,6 +82,8 @@ enum Action {
     CloseMenu,
     /// Open the Trim dialog.
     Trim,
+    /// Turn the clip into a soundboard MP3 in its place (#25).
+    DiscordReady,
     /// Open the Volume panel (clips with separate tracks).
     OpenVolume,
     /// Moved a volume slider; `true` once let go (then it's stored).
@@ -340,6 +342,23 @@ impl ClipsPage {
                 let v = self.volumes_of(&clip.path);
                 super::trim::TrimDialog::open(clip, v).map(|d| self.trim = Some(d))
             }
+            Action::DiscordReady => match self.make_discord_ready(&clip.path, 0.0, 1.0) {
+                Ok(Some(msg)) => {
+                    self.toast = Some((msg, Instant::now()));
+                    Ok(())
+                }
+                // Too long: pick the part to keep in the Trim dialog.
+                Ok(None) => {
+                    self.stop();
+                    let v = self.volumes_of(&clip.path);
+                    super::trim::TrimDialog::open_for_soundboard(clip, v).map(|d| self.trim = Some(d))
+                }
+                Err(e) => {
+                    crate::log!("making {} Discord-ready failed: {e:#}", clip.path.display());
+                    self.toast = Some((format!("Couldn't make it Discord-ready: {e:#}"), Instant::now()));
+                    Ok(())
+                }
+            },
             Action::CancelRename => {
                 self.renaming = None;
                 Ok(())
@@ -395,6 +414,31 @@ impl ClipsPage {
         }
     }
 
+    /// Replaces the clip with its Discord-ready version (#25). Returns the
+    /// message to show, or `None` when the selection is too long (nothing
+    /// changed).
+    fn make_discord_ready(&mut self, path: &Path, start: f32, end: f32) -> anyhow::Result<Option<String>> {
+        let v = self.volumes_of(path);
+        if self.player.as_ref().is_some_and(|p| p.path() == path) {
+            self.stop();
+        }
+        let new = match library::make_discord_ready(path, start, end, v)? {
+            library::DiscordReady::TooLong(_) => return Ok(None),
+            library::DiscordReady::Done(new) => new,
+        };
+        crate::log!("made {} Discord-ready: {}", path.display(), new.display());
+        // The mix is in the file now: forget the clip's volumes.
+        if let Err(e) = volumes::set(path, Volumes::default()) {
+            crate::log!("clearing the volumes of {} failed: {e:#}", path.display());
+        }
+        self.volumes = volumes::load();
+        if self.volume_panel.as_ref().is_some_and(|(p, _)| p == path) {
+            self.volume_panel = None;
+        }
+        self.last_scan = None; // show the new file now
+        Ok(Some(format!("Discord-ready: {}. The original is in the Recycle Bin.", file_name(&new))))
+    }
+
     /// Shows the Trim dialog if it's open, and carries out what was chosen.
     fn show_trim(&mut self, ctx: &egui::Context) {
         use super::trim::Choice;
@@ -420,6 +464,11 @@ impl ClipsPage {
             Choice::Copy { start, end } => library::trimmed_temp_copy(&path, start, end, self.volumes_of(&path)).map(|tmp| {
                 send(Command::CopyClip(tmp, library::Tracks::Both));
                 Some("Trimmed copy copied. Paste it into a Discord chat with Ctrl+V.".to_string())
+            }),
+            Choice::DiscordReady { start, end } => self.make_discord_ready(&path, start, end).and_then(|msg| {
+                msg.map(Some).ok_or_else(|| {
+                    anyhow::anyhow!("The selection is longer than {} seconds.", library::SOUNDBOARD_MAX_SECONDS)
+                })
             }),
         };
         match result {
@@ -680,8 +729,20 @@ fn tile(
     let buttons = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 30.0), inner.max);
     let mut row = ui.new_child(egui::UiBuilder::new().max_rect(buttons).layout(Layout::left_to_right(Align::Center)));
     row.spacing_mut().item_spacing.x = 8.0;
-    if button_sized(&mut row, "Copy", ButtonKind::Primary, 30.0).on_hover_text("Copy to paste into Discord").clicked() {
-        action = Some(Action::Copy(library::Tracks::Both));
+    // The main action is the soundboard (#25); Copy (for chats) is in the ⋯ menu.
+    let ready = matches!(analysis, Some(Ok(a)) if library::is_discord_ready(clip, a.seconds, a.channels, custom_mix));
+    if ready {
+        if button_sized(&mut row, "Show in Explorer", ButtonKind::Secondary, 30.0)
+            .on_hover_text("This clip is ready for Discord's soundboard: pick this file when you upload a sound")
+            .clicked()
+        {
+            action = Some(Action::Show);
+        }
+    } else if button_sized(&mut row, "Make Discord-ready", ButtonKind::Primary, 30.0)
+        .on_hover_text("Mixes the tracks into one MP3 of 5 s or less for the soundboard and replaces this clip; the original goes to the Recycle Bin")
+        .clicked()
+    {
+        action = Some(Action::DiscordReady);
     }
     // Everything else is in the ⋯ menu, so the card never runs out of room.
     let more = row
@@ -791,21 +852,21 @@ fn more_button(ui: &mut Ui, open: bool) -> egui::Response {
 fn card_menu(ui: &Ui, id: egui::Id, button: &egui::Response, has_tracks: bool) -> Option<Action> {
     use library::Tracks;
     let mut picked = None;
-    // Groups, separated by a line. Clips with separate tracks can copy one.
-    let mut groups: Vec<Vec<(&str, fn() -> Action)>> = Vec::new();
+    // Groups, separated by a line: copying (for chats; clips with separate
+    // tracks can copy one), editing, deleting.
+    let mut copy: Vec<(&str, fn() -> Action)> = vec![("Copy", || Action::Copy(Tracks::Both))];
+    let mut edit: Vec<(&str, fn() -> Action)> = Vec::new();
     if has_tracks {
-        groups.push(vec![
-            ("Volume…", || Action::OpenVolume),
-            ("Copy Discord only", || Action::Copy(Tracks::Discord)),
-            ("Copy mic only", || Action::Copy(Tracks::Mic)),
-        ]);
+        copy.push(("Copy Discord only", || Action::Copy(Tracks::Discord)));
+        copy.push(("Copy mic only", || Action::Copy(Tracks::Mic)));
+        edit.push(("Volume…", || Action::OpenVolume));
     }
-    groups.push(vec![
-        ("Trim…", || Action::Trim),
+    edit.extend([
+        ("Trim…", (|| Action::Trim) as fn() -> Action),
         ("Rename", || Action::StartRename),
         ("Show in Explorer", || Action::Show),
     ]);
-    groups.push(vec![("Delete", || Action::Delete)]);
+    let groups = [copy, edit, vec![("Delete", || Action::Delete)]];
     let area = egui::Area::new(id.with("menu"))
         .order(egui::Order::Foreground)
         .pivot(Align2::RIGHT_TOP)
