@@ -1038,7 +1038,12 @@ fn tile(
     let title_rect = Rect::from_min_max(pos2(inner.left(), title_y), pos2(inner.right() - 96.0, title_y + 20.0));
     match editing {
         Some(text) => {
-            if let Some(a) = name_editor(ui, title_rect.expand2(vec2(4.0, 3.0)), text, id.with("rename")) {
+            // In a child Ui: placing the text field moves its Ui's cursor to
+            // below the field, which on the grid's Ui would let the next row
+            // overlap this one (#62).
+            let rect = title_rect.expand2(vec2(4.0, 3.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+            if let Some(a) = name_editor(&mut child, rect, text, id.with("rename")) {
                 action = Some(a);
             }
         }
