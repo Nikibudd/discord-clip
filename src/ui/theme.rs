@@ -322,7 +322,9 @@ pub struct Backdrop {
 
 impl Backdrop {
     /// Overlay opacities from Discord's CSS (`--custom-background-gradient-*`):
-    /// content = "chat", sidebar = "lowest", status panel = "low" (#46),
+    /// content = "chat", sidebar = "high" (like Discord's channel list,
+    /// `.guildSidebar`), status card = "highest" (the
+    /// lightest overlay, so it reads as brighter glass; #46, #55),
     /// title bar = "app-frame".
     pub fn from_discord(theme: &DiscordTheme) -> Option<Backdrop> {
         let tint = theme.tint.as_ref()?;
@@ -342,14 +344,14 @@ impl Backdrop {
         let (content, sidebar, panel, frame) = if tint.custom {
             let m = (30.0 + 0.7 * (100.0 - tint.mix * 100.0)) / 100.0;
             if dark {
-                (0.48 + m * 0.32, 0.54 + m * 0.36, 0.48 + m * 0.32, 0.42 + m * 0.28)
+                (0.48 + m * 0.32, 0.45 + m * 0.3, 0.39 + m * 0.26, 0.42 + m * 0.28)
             } else {
-                (0.85 * (0.6 + m * 0.4), 0.51 + m * 0.34, 0.45 + m * 0.3, 0.325 + m * 0.325)
+                (0.85 * (0.6 + m * 0.4), 0.42 + m * 0.28, 0.95 * (0.8 + m * 0.2), 0.325 + m * 0.325)
             }
         } else if dark {
-            (0.8, 0.9, 0.8, 0.7)
+            (0.8, 0.75, 0.65, 0.7)
         } else {
-            (0.85, 0.85, 0.75, 0.65)
+            (0.85, 0.7, 0.95, 0.65)
         };
         let overlay = if dark { Color32::BLACK } else { Color32::WHITE };
         Some(Backdrop { stops, angle: tint.angle, overlay, content, sidebar, panel, frame })
@@ -400,6 +402,35 @@ impl Backdrop {
                 mesh.add_triangle(i, i + 1, i + w);
                 mesh.add_triangle(i + 1, i + w + 1, i + w);
             }
+        }
+        painter.add(mesh);
+    }
+
+    /// Fills a rounded rectangle with the gradient (which spans `window`):
+    /// a fan of triangles from the centre around the rounded outline.
+    pub fn paint_rounded(&self, painter: &egui::Painter, window: Rect, rect: Rect, radius: f32, opacity: f32) {
+        const STEPS: usize = 8; // per corner
+        let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+        // Corner centres and the angle each corner's arc starts at, clockwise
+        // from the top-left (screen y points down).
+        let corners = [
+            (pos2(rect.left() + r, rect.top() + r), 180.0_f32),
+            (pos2(rect.right() - r, rect.top() + r), 270.0),
+            (pos2(rect.right() - r, rect.bottom() - r), 0.0),
+            (pos2(rect.left() + r, rect.bottom() - r), 90.0),
+        ];
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(rect.center(), self.at(window, rect.center(), opacity));
+        for (c, start) in corners {
+            for s in 0..=STEPS {
+                let a = (start + 90.0 * s as f32 / STEPS as f32).to_radians();
+                let p = c + vec2(a.cos(), a.sin()) * r;
+                mesh.colored_vertex(p, self.at(window, p, opacity));
+            }
+        }
+        let n = mesh.vertices.len() as u32;
+        for i in 1..n {
+            mesh.add_triangle(0, i, if i + 1 < n { i + 1 } else { 1 });
         }
         painter.add(mesh);
     }
@@ -641,23 +672,26 @@ mod tests {
     }
 
     #[test]
-    fn status_panel_overlay_is_lighter_than_the_sidebar() {
-        // Discord's "low" level against "lowest" (#46), for presets and
-        // custom themes, dark and light.
+    fn status_card_is_brighter_than_the_sidebar() {
+        // Discord's "highest" level against "high" (#46, #55), for presets
+        // and custom themes, dark and light: less black overlay on dark
+        // themes, more white on light ones.
+        let window = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0));
         for (base, custom) in [(Base::Dark, false), (Base::Light, false), (Base::Dark, true), (Base::Light, true)] {
             let theme = DiscordTheme {
                 base,
-                tint: Some(Tint { stops: vec![([255, 0, 0], 0.0)], angle: 180.0, custom, mix: 0.5 }),
+                tint: Some(Tint { stops: vec![([128, 0, 128], 0.0)], angle: 180.0, custom, mix: 0.5 }),
                 saturation: 1.0,
             };
             let b = Backdrop::from_discord(&theme).unwrap();
-            assert!(b.panel < b.sidebar, "{base:?} custom={custom}: panel {} sidebar {}", b.panel, b.sidebar);
+            let luma = |c: Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
+            let p = pos2(100.0, 100.0);
+            assert!(
+                luma(b.at(window, p, b.panel)) > luma(b.at(window, p, b.sidebar)),
+                "{base:?} custom={custom}: panel {} sidebar {}",
+                b.panel,
+                b.sidebar
+            );
         }
-        let dark = DiscordTheme {
-            base: Base::Dark,
-            tint: Some(Tint { stops: vec![([255, 0, 0], 0.0)], angle: 180.0, custom: false, mix: 0.5 }),
-            saturation: 1.0,
-        };
-        assert_eq!(Backdrop::from_discord(&dark).unwrap().panel, 0.8);
     }
 }

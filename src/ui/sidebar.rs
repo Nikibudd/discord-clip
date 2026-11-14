@@ -1,27 +1,34 @@
 //! The left sidebar: page list, and a status panel at the bottom like
 //! Discord's user panel.
 
-use eframe::egui::{self, pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, Frame, Margin, Rect, Sense, Ui, Vec2};
+use eframe::egui::{self, pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, Frame, Margin, Rect, Sense, Stroke, Ui, Vec2};
 
 use super::theme::*;
 use super::widgets::*;
 use super::{Icons, Page, Snapshot};
 use crate::update::State;
 
+/// Discord's user panel floats as a card (#55): this far from the sidebar's
+/// edges, with this radius (`--custom-panels-spacing`, `--radius-sm`).
+const CARD_INSET: f32 = 8.0;
+const CARD_RADIUS: f32 = 8.0;
+const CARD_HEIGHT: f32 = 52.0;
+
 pub fn show(ui: &mut Ui, page: &mut Page, snap: &Snapshot, icons: &Icons) {
     egui::Panel::bottom("status")
-        .exact_size(52.0)
+        .exact_size(CARD_HEIGHT + CARD_INSET)
         .resizable(false)
         .show_separator_line(false)
-        .frame(Frame::new().fill(panel_fill()).inner_margin(Margin::symmetric(8, 0)))
+        .frame(Frame::NONE)
         .show(ui, |ui| {
-            // A Nitro gradient shows through, a little lighter than the
-            // sidebar, like Discord's user panel (#46).
-            if let Some(b) = backdrop() {
-                let rect = ui.max_rect().expand2(vec2(8.0, 0.0));
-                b.paint(&ui.ctx().layer_painter(ui.layer_id()), ui.ctx().content_rect(), rect, b.panel);
-            }
-            status_panel(ui, snap, icons)
+            let area = ui.max_rect();
+            let card = Rect::from_min_max(
+                pos2(area.left() + CARD_INSET, area.top()),
+                pos2(area.right() - CARD_INSET, area.bottom() - CARD_INSET),
+            );
+            status_card(ui, card);
+            let content = card.shrink2(vec2(8.0, 0.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| status_panel(ui, snap, icons));
         });
 
     Frame::new().inner_margin(Margin { left: 10, right: 10, top: 24, bottom: 8 }).show(ui, |ui| {
@@ -41,9 +48,24 @@ pub fn show(ui: &mut Ui, page: &mut Page, snap: &Snapshot, icons: &Icons) {
     });
 }
 
-/// The status panel's own fill: none when a gradient is painted behind it.
-fn panel_fill() -> Color32 {
-    if backdrop().is_some() { Color32::TRANSPARENT } else { pal().bg_secondary_alt }
+/// The card behind the status panel, like Discord's `panels` box: on a
+/// Nitro gradient, the gradient under its lightest overlay (brighter glass)
+/// with a faint frame-coloured edge; on plain themes, `--background-base-low`
+/// with a muted border.
+fn status_card(ui: &Ui, card: Rect) {
+    let painter = ui.painter();
+    let border = match backdrop() {
+        Some(b) => {
+            b.paint_rounded(painter, ui.ctx().content_rect(), card, CARD_RADIUS, b.panel);
+            // `--app-frame-border`: white or black at about 12%.
+            if pal().dark { Color32::from_white_alpha(31) } else { Color32::from_black_alpha(31) }
+        }
+        None => {
+            painter.rect_filled(card, CornerRadius::same(CARD_RADIUS as u8), pal().bg_secondary_alt);
+            pal().divider
+        }
+    };
+    painter.rect_stroke(card, CornerRadius::same(CARD_RADIUS as u8), Stroke::new(1.0, border), egui::StrokeKind::Inside);
 }
 
 /// `badge`: Discord's red notification pill on the right.
