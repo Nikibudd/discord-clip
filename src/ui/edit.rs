@@ -109,6 +109,15 @@ impl EditDialog {
     /// Draws the dialog; returns the user's choice once they make one.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Choice> {
         self.update_playback(ctx);
+        // Space plays or pauses the selection, as on the Clips page (#47).
+        // Taken out of the input so it doesn't also press a focused button.
+        let space = |e: &egui::Event| {
+            matches!(e, egui::Event::Key { key: egui::Key::Space, pressed: true, repeat: false, modifiers, .. } if modifiers.is_none())
+        };
+        if !ctx.text_edit_focused() && ctx.input(|i| i.events.iter().any(space)) {
+            ctx.input_mut(|i| i.events.retain(|e| !space(e)));
+            self.toggle_play();
+        }
         let mut choice = None;
         let screen = ctx.content_rect();
         let width = (screen.width() - 80.0).clamp(320.0, 680.0);

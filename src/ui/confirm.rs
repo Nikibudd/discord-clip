@@ -7,6 +7,10 @@ use eframe::egui::{self, vec2, Align, Color32, CornerRadius, Frame, Layout, Marg
 use super::theme::*;
 use super::widgets::*;
 
+fn is_fresh_enter(e: &egui::Event) -> bool {
+    matches!(e, egui::Event::Key { key: egui::Key::Enter, pressed: true, repeat: false, modifiers, .. } if modifiers.is_none())
+}
+
 pub struct ConfirmDialog {
     title: String,
     text: String,
@@ -52,7 +56,10 @@ impl ConfirmDialog {
                         });
                     });
             });
-        if answer.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+        // A fresh Enter press: Enter held since it opened the dialog (#47)
+        // must not confirm it too.
+        if answer.is_none() && ctx.input(|i| i.events.iter().any(is_fresh_enter)) {
+            ctx.input_mut(|i| i.events.retain(|e| !is_fresh_enter(e)));
             answer = Some(true);
         }
         if answer.is_none() && modal.should_close() {
