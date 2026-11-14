@@ -31,7 +31,7 @@ use crate::config::Config;
 use crate::log;
 use crate::ringbuffer::RingBuffer;
 use crate::ui;
-use actions::{save_clip, show_last_clip};
+use actions::{open_last_clip, save_clip};
 use global_hotkey::{register_hotkey, unregister_hotkey, HOTKEY_ID};
 use notify_icon::{make_icon, notify, notify_always, tray_add, tray_remove, tray_update};
 use window::{handle_ui_command, install_update, notify_update_available, snapshot};
@@ -282,7 +282,7 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
             WM_LBUTTONUP => ui::open(snapshot(&app)),
             WM_RBUTTONUP | WM_CONTEXTMENU => menu::show_menu(&app),
             NIN_BALLOONUSERCLICK => match app.balloon.get() {
-                Balloon::ShowClip => show_last_clip(&app),
+                Balloon::ShowClip => open_last_clip(&app),
                 Balloon::OpenUpdates => ui::open_page(snapshot(&app), ui::Page::Updates),
             },
             _ => {}

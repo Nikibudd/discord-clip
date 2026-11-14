@@ -118,6 +118,8 @@ struct Shared {
     started: AtomicBool,
     /// Page to switch to the next time the window draws.
     requested_page: Mutex<Option<Page>>,
+    /// A clip for the Clips page to scroll to and highlight (#50).
+    focus_clip: Mutex<Option<PathBuf>>,
 }
 
 fn shared() -> &'static Shared {
@@ -129,6 +131,7 @@ fn shared() -> &'static Shared {
         hwnd: AtomicIsize::new(0),
         started: AtomicBool::new(false),
         requested_page: Mutex::new(None),
+        focus_clip: Mutex::new(None),
     })
 }
 
@@ -162,6 +165,13 @@ fn send(cmd: Command) {
 pub fn open_page(snapshot: Snapshot, page: Page) {
     *shared().requested_page.lock().unwrap() = Some(page);
     open(snapshot);
+}
+
+/// Tray thread: shows the window on the Clips page, scrolled to `clip` and
+/// highlighting it (#50: clicking the "Clip saved" notification).
+pub fn open_clip(snapshot: Snapshot, clip: PathBuf) {
+    *shared().focus_clip.lock().unwrap() = Some(clip);
+    open_page(snapshot, Page::Clips);
 }
 
 /// Tray thread: shows the window, creating it the first time. Closing the
@@ -333,6 +343,9 @@ impl eframe::App for ClipWindow {
         self.settings.keybind.poll(ui);
         if let Some(page) = shared().requested_page.lock().unwrap().take() {
             self.page = page;
+        }
+        if let Some(clip) = shared().focus_clip.lock().unwrap().take() {
+            self.clips.focus(clip);
         }
         let snap = shared().snapshot.lock().unwrap().clone();
         self.theme.update(&ctx, snap.cfg.theme);
