@@ -17,6 +17,7 @@ mod edit;
 mod follow;
 mod keybind;
 mod settings;
+mod avatars;
 mod sidebar;
 mod theme;
 mod updates;
@@ -59,6 +60,8 @@ pub enum Command {
     SetMicGain(f32),
     SetClipboard(bool),
     SetNotifications(bool),
+    /// Record who talks when (#66, #67).
+    SetSpeakers(bool),
     PickFolder,
     OpenFolder,
     OpenLog,
@@ -342,6 +345,7 @@ fn set(cmd: Command) {
             Command::SetMicGain(g) => snap.cfg.mic_gain = *g,
             Command::SetClipboard(c) => snap.cfg.clipboard = *c,
             Command::SetNotifications(n) => snap.cfg.notifications = *n,
+            Command::SetSpeakers(on) => snap.cfg.speakers = *on,
             Command::SetCheckUpdates(c) => snap.cfg.check_updates = *c,
             Command::SetSeparateTracks(s) => snap.cfg.separate_tracks = *s,
             Command::SetFormat(f) => snap.cfg.format = *f,

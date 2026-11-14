@@ -133,6 +133,14 @@ impl SettingsPage {
             set(Command::SetMicGain(gain));
         }
 
+        ui.add_space(24.0);
+        // #66 / #67: who talked when, from Discord's voice status.
+        let speakers_desc = "Records who talks when in each clip, shown under the waveform in Edit. \
+            Reads only Discord's voice status, never your login. Turning it on applies after a restart.";
+        if row(ui, "Show who's talking", speakers_desc, |ui| toggle(ui, cfg.speakers)).clicked() {
+            set(Command::SetSpeakers(!cfg.speakers));
+        }
+
         divider(ui);
 
         // Saving

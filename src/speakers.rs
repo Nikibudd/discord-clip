@@ -73,7 +73,7 @@ pub fn load() -> Table {
     read_json(&store_path())
 }
 
-#[allow(dead_code)] // read by the Edit dialog's people list (#67) and the filter (#69)
+
 pub fn load_users() -> Users {
     read_json(&users_path())
 }
@@ -111,8 +111,9 @@ pub fn record(path: &Path, discord: &[f32], mic: &[f32], rate: u32, end: Instant
     remember_users(&ids)
 }
 
-/// Adds or refreshes the names of `ids` from what Discord told us.
-fn remember_users(ids: &[String]) -> Result<()> {
+/// Adds or refreshes the names of `ids` from what Discord told us (on save,
+/// and when the Edit dialog showed them with fresh names, #67).
+pub fn remember_users(ids: &[String]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }

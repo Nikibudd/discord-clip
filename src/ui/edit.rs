@@ -5,17 +5,29 @@
 //!
 //! The dialog only picks the selection and volumes; the Clips page writes
 //! the files.
+//!
+//! Under the waveform, the people who talk in the clip (#67): a row each
+//! with their profile picture and name, and a dot where they start and stop
+//! talking, joined by a line, on the waveform's time axis.
 
 use std::time::Duration;
 
 use eframe::egui::{self, pos2, vec2, Align, Color32, CornerRadius, CursorIcon, Frame, Layout, Margin, Rect, Sense, Stroke, Ui};
 
+use super::avatars::Avatars;
 use super::clips::{clock, clock_precise, megabytes, play_button, today, when};
 use super::theme::*;
 use super::widgets::*;
 use crate::library::{self, ClipFile};
 use crate::player::Playback;
+use crate::speakers::{ClipSpeakers, Users, YOU};
 use crate::volumes::Volumes;
+
+/// Room left of the waveform for the people's pictures and names (#67).
+const GUTTER: f32 = 132.0;
+const PERSON_ROW: f32 = 26.0;
+/// Rows shown before the list scrolls.
+const MAX_ROWS: usize = 6;
 
 /// Bars in the dialog's waveforms (cards use `library::WAVEFORM_BARS`).
 const BARS: usize = 160;
@@ -44,6 +56,15 @@ pub struct EditDialog {
     error: Option<String>,
     /// Opened from Make Discord-ready on a clip that's too long (#25).
     soundboard: bool,
+    /// Who talked when (#66), if it was recorded.
+    speakers: Option<ClipSpeakers>,
+    /// Names as last stored; Discord's current ones win when it has them.
+    users: Users,
+    avatars: Avatars,
+    /// The waveform's x for 0 and 1 of the clip, last frame.
+    x_range: (f32, f32),
+    /// Where the waveform drew the playhead (0..=1), for the people rows.
+    head: Option<f32>,
 }
 
 /// What the user chose in the dialog.
@@ -75,6 +96,11 @@ impl EditDialog {
             player: None,
             error: None,
             soundboard: false,
+            speakers: load_speakers(clip),
+            users: crate::speakers::load_users(),
+            avatars: Avatars::default(),
+            x_range: (0.0, 1.0),
+            head: None,
         })
     }
 
@@ -120,7 +146,9 @@ impl EditDialog {
         }
         let mut choice = None;
         let screen = ctx.content_rect();
-        let width = (screen.width() - 80.0).clamp(320.0, 680.0);
+        // Wider by the people column, so the waveform keeps its size (#67).
+        let widest = if self.speakers.is_some() { 680.0 + GUTTER } else { 680.0 };
+        let width = (screen.width() - 80.0).clamp(320.0, widest);
         let modal = egui::Modal::new(egui::Id::unique("edit-dialog"))
             .backdrop_color(Color32::from_black_alpha(170))
             .frame(Frame::new().fill(pal().bg_primary).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(20)))
@@ -138,6 +166,13 @@ impl EditDialog {
         }
         if choice.is_some() {
             self.player = None; // stop playing
+            // Keep names Discord told us while the dialog was open (renames).
+            if let Some(s) = &self.speakers {
+                let ids: Vec<String> = s.segments.iter().filter_map(|g| g.who.clone()).filter(|w| w != YOU).collect();
+                if let Err(e) = crate::speakers::remember_users(&ids) {
+                    crate::log!("saving names: {e:#}");
+                }
+            }
         }
         choice
     }
@@ -161,6 +196,7 @@ impl EditDialog {
         ui.add_space(16.0);
 
         self.waveform(ui);
+        self.people(ui);
         ui.add_space(14.0);
 
         // Play selection, and how long / big the result is.
@@ -267,7 +303,11 @@ impl EditDialog {
         let track_h = if n > 1 { TWO_TRACK_HEIGHT } else { ONE_TRACK_HEIGHT };
         let height = track_h * n as f32 + TRACK_GAP * (n - 1) as f32;
         let (panel, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+        // The people column (#67) is left of the waveform.
+        let gutter = if self.speakers.is_some() { GUTTER } else { 0.0 };
+        let panel = panel.with_min_x(panel.left() + gutter);
         let (left, right) = (panel.left() + 14.0, panel.right() - 14.0);
+        self.x_range = (left, right);
         let x_at = |f: f32| left + f * (right - left);
         let frac_at = |x: f32| ((x - left) / (right - left)).clamp(0.0, 1.0);
         let min_gap = (MIN_SECONDS / self.seconds).min(1.0);
@@ -313,6 +353,7 @@ impl EditDialog {
         }
         // Where it was let go, not the old spot (see #12).
         let head = drag_at.or(released_at).or(self.player.as_ref().map(|p| p.position()));
+        self.head = head;
         let painter = ui.painter();
         for (t, peaks) in self.tracks.iter().enumerate() {
             let top = panel.top() + t as f32 * (track_h + TRACK_GAP);
@@ -364,7 +405,8 @@ impl EditDialog {
 
         // Times under the handles, kept apart so they don't overlap.
         ui.add_space(6.0);
-        let (row, _) = ui.allocate_exact_size(vec2(panel.width(), 18.0), Sense::hover());
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+        let row = row.with_min_x(panel.left());
         let font_id = font(13.0, Weight::Semibold);
         let start_label = ui.painter().layout_no_wrap(clock_precise(self.start * self.seconds), font_id.clone(), pal().header_secondary);
         let end_label = ui.painter().layout_no_wrap(clock_precise(self.end * self.seconds), font_id, pal().header_secondary);
@@ -378,6 +420,124 @@ impl EditDialog {
         );
         ui.painter().galley(pos2(sx, row.top()), start_label, pal().header_secondary);
         ui.painter().galley(pos2(ex, row.top()), end_label, pal().header_secondary);
+    }
+
+    /// The people who talk in the clip (#67): a row each, with their
+    /// picture and name in the column left of the waveform, and a dot where
+    /// they start and stop talking, joined by a line, on its time axis.
+    fn people(&mut self, ui: &mut Ui) {
+        let Some(data) = &self.speakers else { return };
+        // In order of who talks first (segments are sorted); unnamed last.
+        let mut order: Vec<Option<String>> = Vec::new();
+        for s in &data.segments {
+            if !order.contains(&s.who) {
+                order.push(s.who.clone());
+            }
+        }
+        order.sort_by_key(Option::is_none);
+        let live = crate::discord_voice::users();
+        let own_id = crate::discord_voice::own_id();
+        let seconds = data.seconds.max(0.01);
+        let (left, right) = self.x_range;
+        let x_at = |t: f32| left + (t / seconds).clamp(0.0, 1.0) * (right - left);
+        let (sel_start, sel_end) = (self.start, self.end);
+        let (avatars, users) = (&mut self.avatars, &self.users);
+        let mut seek_to = None;
+
+        ui.add_space(10.0);
+        let height = order.len().min(MAX_ROWS) as f32 * PERSON_ROW;
+        // A dark panel behind the lines, like the waveform's, with the same
+        // tint for the selection; drawn first so the rows go on top.
+        const PAD: f32 = 4.0;
+        let top = ui.cursor().top();
+        let panel = Rect::from_x_y_ranges(left - 14.0..=right + 14.0, top..=top + height + 2.0 * PAD);
+        ui.painter().rect_filled(panel, CornerRadius::same(6), pal().bg_tertiary);
+        let sel = Rect::from_x_y_ranges(x_at(sel_start * seconds)..=x_at(sel_end * seconds), panel.y_range());
+        ui.painter().rect_filled(sel, CornerRadius::ZERO, mix(pal().bg_tertiary, BLURPLE, 0.14));
+        ui.add_space(PAD);
+        egui::ScrollArea::vertical().id_salt("edit-people").max_height(height).auto_shrink([false, true]).show(ui, |ui| {
+            for (r, who) in order.iter().enumerate() {
+                let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), PERSON_ROW), Sense::hover());
+                let color = person_color(who.as_deref());
+                // Who: you, someone Discord named, or speech without a name.
+                let (name, avatar) = match who.as_deref() {
+                    Some(YOU) => ("You".to_string(), own_id.clone().map(|id| (id.clone(), live.get(&id).and_then(|u| u.avatar.clone())))),
+                    Some(id) => {
+                        let (name, hash) = match (live.get(id), users.get(id)) {
+                            (Some(u), _) => (u.name.clone(), u.avatar.clone()),
+                            (None, Some(u)) => (u.name.clone(), u.avatar.clone()),
+                            (None, None) => ("Unknown".to_string(), None),
+                        };
+                        (name, Some((id.to_string(), hash)))
+                    }
+                    None => ("Other".to_string(), None),
+                };
+
+                // Picture: round, with a ring in the person's colour.
+                let center = pos2(row.left() + 12.0, row.center().y);
+                let pic = Rect::from_center_size(center, vec2(20.0, 20.0));
+                let texture = avatar.as_ref().and_then(|(id, hash)| avatars.get(ui.ctx(), id, hash.as_deref()));
+                let painter = ui.painter();
+                match texture {
+                    Some(t) => {
+                        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                        painter.add(egui::epaint::RectShape::filled(pic, CornerRadius::same(10), Color32::WHITE).with_texture(t.id(), uv));
+                    }
+                    None => {
+                        painter.circle_filled(center, 10.0, color.gamma_multiply(0.8));
+                        let initial = if who.is_some() { name.chars().next().unwrap_or('?').to_uppercase().to_string() } else { "?".into() };
+                        painter.text(center, egui::Align2::CENTER_CENTER, initial, font(11.0, Weight::Bold), Color32::WHITE);
+                    }
+                }
+                painter.circle_stroke(center, 10.5, Stroke::new(1.5, color));
+
+                // Name, cut with "…" to fit the column.
+                let mut job = egui::text::LayoutJob::simple_singleline(name.clone(), font(13.0, Weight::Semibold), pal().text_normal);
+                job.wrap = egui::text::TextWrapping {
+                    max_width: GUTTER - 44.0,
+                    max_rows: 1,
+                    break_anywhere: true,
+                    overflow_character: Some('…'),
+                };
+                let galley = painter.layout_job(job);
+                painter.galley(pos2(row.left() + 28.0, row.center().y - galley.size().y / 2.0), galley, pal().text_normal);
+
+                // Talking: dots at start and stop, joined by a line.
+                for (i, s) in data.segments.iter().filter(|s| &s.who == who).enumerate() {
+                    let (xa, xb) = (x_at(s.start), x_at(s.end));
+                    let inside = s.end / seconds > sel_start && s.start / seconds < sel_end;
+                    let c = if inside { color } else { color.gamma_multiply(0.35) };
+                    let y = row.center().y;
+                    let hit = Rect::from_x_y_ranges(xa - 5.0..=xb.max(xa) + 5.0, row.y_range());
+                    let resp = ui
+                        .interact(hit, ui.make_persistent_id(("edit-person", r, i)), Sense::click())
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(format!("{name} · {} – {}", clock_precise(s.start), clock_precise(s.end)));
+                    let painter = ui.painter();
+                    let width = if resp.hovered() { 4.0 } else { 3.0 };
+                    if xb - xa < 6.0 {
+                        painter.circle_filled(pos2((xa + xb) / 2.0, y), 4.0, c);
+                    } else {
+                        painter.line_segment([pos2(xa, y), pos2(xb, y)], Stroke::new(width, c));
+                        painter.circle_filled(pos2(xa, y), 4.0, c);
+                        painter.circle_filled(pos2(xb, y), 4.0, c);
+                    }
+                    if resp.clicked() {
+                        seek_to = Some(s.start / seconds);
+                    }
+                }
+            }
+        });
+        ui.add_space(PAD);
+        // The playhead runs on through the rows, where the waveform has it.
+        if let Some(h) = self.head {
+            let x = x_at(h * seconds);
+            ui.painter().line_segment([pos2(x, panel.top() + 4.0), pos2(x, panel.bottom() - 4.0)], Stroke::new(2.0, pal().header_primary));
+        }
+        // Clicking someone's talking moves the playhead there (inside the selection).
+        if let Some(f) = seek_to {
+            self.seek(f.min(self.end - 0.001).max(self.start));
+        }
     }
 
     fn toggle_play(&mut self) {
@@ -419,6 +579,37 @@ impl EditDialog {
             self.player = None;
         } else if !p.is_paused() {
             ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+}
+
+/// Who talked in the clip (#66), if anything was recorded; asks Discord for
+/// the current names of the people in it (#67), so renames show.
+fn load_speakers(clip: &ClipFile) -> Option<ClipSpeakers> {
+    let data = crate::speakers::lookup(&crate::speakers::load(), &clip.path).cloned().filter(|d| !d.segments.is_empty())?;
+    crate::discord_voice::refresh_users(data.segments.iter().filter_map(|s| s.who.clone()).filter(|w| w != YOU));
+    Some(data)
+}
+
+/// A person's colour, the same in every clip: from their user id. You are
+/// green, speech without a name gray.
+fn person_color(who: Option<&str>) -> Color32 {
+    const COLORS: [Color32; 7] = [
+        Color32::from_rgb(0x00, 0xA8, 0xFC), // blue
+        Color32::from_rgb(0xEB, 0x45, 0x9E), // fuchsia
+        Color32::from_rgb(0xF0, 0xB2, 0x32), // yellow
+        Color32::from_rgb(0x9B, 0x84, 0xEE), // purple
+        Color32::from_rgb(0xE6, 0x7E, 0x22), // orange
+        Color32::from_rgb(0x1A, 0xBC, 0x9C), // teal
+        Color32::from_rgb(0xF2, 0x3F, 0x43), // red
+    ];
+    match who {
+        None => pal().text_muted,
+        Some(YOU) => Color32::from_rgb(0x23, 0xA5, 0x5A),
+        Some(id) => {
+            // FNV-1a: stable across runs (unlike the std hasher).
+            let h = id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+            COLORS[(h % COLORS.len() as u64) as usize]
         }
     }
 }

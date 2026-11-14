@@ -402,8 +402,8 @@ impl Drop for Handle {
 }
 
 /// GETs an https URL (following redirects), passing the body to `on_chunk`.
-fn http_get(url: &str, mut on_chunk: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
-    let rest = url.strip_prefix("https://").context("update URLs must use https")?;
+pub(crate) fn http_get(url: &str, mut on_chunk: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+    let rest = url.strip_prefix("https://").context("URLs must use https")?;
     let (host, path) = match rest.split_once('/') {
         Some((h, p)) => (h, format!("/{p}")),
         None => (rest, "/".to_string()),

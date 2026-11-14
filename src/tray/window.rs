@@ -94,6 +94,7 @@ pub(super) fn handle_ui_command(app: &App, cmd: Command) {
         Command::SetMicGain(g) => update_settings(app, |c| c.mic_gain = g.clamp(0.0, 10.0)),
         Command::SetClipboard(on) => update_settings(app, |c| c.clipboard = on),
         Command::SetNotifications(on) => update_settings(app, |c| c.notifications = on),
+        Command::SetSpeakers(on) => update_settings(app, |c| c.speakers = on),
         Command::SetSeparateTracks(on) => update_settings(app, |c| c.separate_tracks = on),
         Command::SetTheme(t) => update_settings(app, |c| c.theme = t),
         Command::SetFormat(f) => {
