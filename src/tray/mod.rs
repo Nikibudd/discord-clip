@@ -31,7 +31,7 @@ use crate::config::Config;
 use crate::log;
 use crate::ringbuffer::RingBuffer;
 use crate::ui;
-use actions::{open_last_clip, save_clip};
+use actions::{finish_clip, open_last_clip, request_clip};
 use global_hotkey::{register_hotkey, unregister_hotkey, HOTKEY_ID};
 use notify_icon::{make_icon, notify, notify_always, tray_add, tray_remove, tray_update};
 use window::{handle_ui_command, install_update, notify_update_available, snapshot};
@@ -44,6 +44,8 @@ const WM_LIBRARY_CHANGED: u32 = WM_APP + 5;
 /// Refreshes the tooltip's clips line ("last saved 2 min ago", and changes
 /// made in Explorer) once a minute (#48).
 const TOOLTIP_TIMER: usize = 1;
+/// Fires `clip::AFTER_SECONDS` after the hotkey to save the clip (#64).
+const CLIP_TIMER: usize = 2;
 const NIN_BALLOONUSERCLICK: u32 = WM_USER + 5;
 
 /// Main window, for other threads to post status updates to.
@@ -121,6 +123,8 @@ pub struct App {
     /// Why the last hotkey change from the window failed.
     hotkey_error: RefCell<Option<String>>,
     last_clip: RefCell<Option<PathBuf>>,
+    /// The hotkey was pressed and the clip is saved when `CLIP_TIMER` fires (#64).
+    clip_pending: Cell<bool>,
     balloon: Cell<Balloon>,
     /// Version we already showed an "update available" notification for.
     notified_update: RefCell<Option<String>>,
@@ -161,6 +165,7 @@ impl App {
             hotkey_registered: Cell::new(false),
             hotkey_error: RefCell::new(None),
             last_clip: RefCell::new(None),
+            clip_pending: Cell::new(false),
             balloon: Cell::new(Balloon::ShowClip),
             notified_update: RefCell::new(None),
             taskbar_created: Cell::new(0),
@@ -277,7 +282,7 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     };
     match msg {
-        WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => save_clip(&app),
+        WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => request_clip(&app),
         WM_TRAY => match lparam.0 as u32 & 0xFFFF {
             WM_LBUTTONUP => ui::open(snapshot(&app)),
             WM_RBUTTONUP | WM_CONTEXTMENU => menu::show_menu(&app),
@@ -302,6 +307,7 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
         }
         WM_LIBRARY_CHANGED => tray_update(&app),
         WM_TIMER if wparam.0 == TOOLTIP_TIMER => tray_update(&app),
+        WM_TIMER if wparam.0 == CLIP_TIMER => finish_clip(&app),
         WM_DESTROY => {
             unregister_hotkey(&app);
             tray_remove(&app);
@@ -317,6 +323,9 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
 }
 
 fn quit(app: &App, exit: Exit) {
+    // A clip waiting out its last seconds (#64) is saved now, with what
+    // was recorded so far, rather than lost.
+    finish_clip(app);
     app.exit.set(exit);
     app.running.store(false, Ordering::SeqCst);
     unsafe {

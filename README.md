@@ -2,7 +2,10 @@
 
 Instant-replay for Discord voice chat on Windows. Sits in the system tray,
 keeps the last N seconds of Discord audio in memory and saves it as a clip
-when you press the hotkey (**Ctrl+Alt+C** by default).
+when you press the hotkey (**Ctrl+Alt+C** by default). It keeps recording
+for 2 more seconds after the press, so a moment that happens just as you
+reach for the key isn't cut off: a 30 s clip is 30 s before the press plus
+2 s after.
 
 - **Other people:** captured with per-process WASAPI loopback of the Discord
   client, so only Discord audio is recorded (no game/music/browser audio).

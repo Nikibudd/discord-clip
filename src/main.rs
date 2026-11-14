@@ -194,7 +194,8 @@ fn main() {
         warnings.push(msg);
     }
 
-    let ring_len = capture::SAMPLE_RATE as usize * capture::CHANNELS as usize * cfg.seconds as usize;
+    // The chosen length before the hotkey plus the seconds recorded after it (#64).
+    let ring_len = capture::SAMPLE_RATE as usize * capture::CHANNELS as usize * (cfg.seconds + clip::AFTER_SECONDS) as usize;
     let running = Arc::new(AtomicBool::new(true));
     let discord_ring = Arc::new(RingBuffer::new(ring_len));
 

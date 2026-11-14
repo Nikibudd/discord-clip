@@ -50,7 +50,12 @@ pub(super) fn tray_nid(app: &App) -> NOTIFYICONDATAW {
     nid.uCallbackMessage = WM_TRAY;
     nid.hIcon = if active { app.icon_active.get() } else { app.icon_idle.get() };
     let short = if active { "Discord: capturing" } else { "Discord: waiting" };
-    let head = format!("Discord Clip\n{} saves the last {}s\n{short}", cfg.hotkey, app.running_seconds);
+    let head = format!(
+        "Discord Clip\n{} saves the last {}s (+{}s after)\n{short}",
+        cfg.hotkey,
+        app.running_seconds,
+        crate::clip::AFTER_SECONDS
+    );
     // The clips line (#48): a folder listing and the marks, nothing decoded.
     let clips = crate::library::scan(&cfg.out_dir);
     let parts = crate::library::summary(&clips, &crate::uploaded::load(), crate::library::SavedAt::now());
