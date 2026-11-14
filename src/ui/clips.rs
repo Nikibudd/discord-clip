@@ -265,7 +265,8 @@ impl ClipsPage {
                 ui.add_space(4.0);
                 let total: u64 = all.iter().map(|c| c.size).sum();
                 let dir = snap.cfg.out_dir.display();
-                // "12 clips · 3 uploaded hidden · 1.4 MB · <folder>"
+                // "12 clips · 3 uploaded hidden · 1.4 MB". The folder is only
+                // named while there are no clips; Open folder is right here.
                 let hidden_note = match (hidden, self.filter) {
                     (0, _) | (_, Filter::All) => String::new(),
                     (n, Filter::NotUploaded) => format!(" · {n} uploaded hidden"),
@@ -273,8 +274,8 @@ impl ClipsPage {
                 };
                 let summary = match all.len() {
                     0 => format!("Saved in {dir}"),
-                    1 => format!("1 clip{hidden_note} · {} · {dir}", megabytes(total)),
-                    n => format!("{n} clips{hidden_note} · {} · {dir}", megabytes(total)),
+                    1 => format!("1 clip{hidden_note} · {}", megabytes(total)),
+                    n => format!("{n} clips{hidden_note} · {}", megabytes(total)),
                 };
                 text(ui, summary, 14.0, Weight::Regular, pal().header_secondary);
             });
