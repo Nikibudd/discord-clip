@@ -25,6 +25,7 @@ winit = { version = "0.30", default-features = false }
 raw-window-handle = "0.6"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+png = "0.18"
 sha2 = "0.11.1"
 semver = "1.0.28"
 # Snappy, for reading Discord's Local Storage (#37).
@@ -65,4 +66,5 @@ features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Environment",
     "Win32_System_Registry",
+    "Win32_System_Pipes",
 ]

@@ -23,6 +23,8 @@ pub struct Config {
     pub clipboard: bool,
     pub notifications: bool,
     pub check_updates: bool,
+    /// Record who talks when in each clip (#66).
+    pub speakers: bool,
     /// Window colours (#37).
     pub theme: ThemeMode,
 }
@@ -41,6 +43,7 @@ impl Default for Config {
             clipboard: true,
             notifications: true,
             check_updates: true,
+            speakers: true,
             theme: ThemeMode::Discord,
         }
     }
@@ -186,6 +189,7 @@ impl Config {
             "out_dir" => self.out_dir = resolve_out_dir(v)?,
             "clipboard" => self.clipboard = parse_bool(key, v)?,
             "notifications" => self.notifications = parse_bool(key, v)?,
+            "speakers" => self.speakers = parse_bool(key, v)?,
             "check_updates" => self.check_updates = parse_bool(key, v)?,
             "theme" => {
                 self.theme = ThemeMode::from_key(v)
@@ -262,6 +266,10 @@ notifications = {}
 # Check GitHub for new versions (nothing is installed without asking)
 check_updates = {}
 
+# Record who talks when in each clip, from Discord's voice status (reads
+# only its voice connection log lines and speaking events, never your login)
+speakers = {}
+
 # Window colours: discord (follow the theme you use in Discord), dark or light
 theme = {}
 ",
@@ -276,6 +284,7 @@ theme = {}
             self.clipboard,
             self.notifications,
             self.check_updates,
+            self.speakers,
             self.theme.key()
         )
     }

@@ -7,7 +7,7 @@
 //! means reading the whole file, so that happens on a worker thread and the
 //! card shows a placeholder until it's done.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -64,6 +64,15 @@ pub struct ClipsPage {
     /// Which clips are shown (#29). Not saved: every start shows the ones
     /// not uploaded yet.
     filter: Filter,
+    /// People picked in the People filter (#69): user ids and/or
+    /// `speakers::YOU`. Empty: everyone. Not saved, like `filter`.
+    people: BTreeSet<String>,
+    people_open: bool,
+    /// Who talks in each clip (#66), cleaned up like in the Edit dialog
+    /// (#72), by `speakers::key`. Reloaded with each scan.
+    talkers: HashMap<String, BTreeSet<String>>,
+    users: crate::speakers::Users,
+    avatars: super::avatars::Avatars,
     /// The selected card, for the keyboard shortcuts (#47).
     selected: Option<PathBuf>,
     /// Scroll the selected card into view when it's next drawn (moved with
@@ -284,9 +293,17 @@ impl ClipsPage {
         let today = today();
         let query = self.search.trim().to_lowercase();
         // The filter (#29) first, then search within what it shows.
-        let shown_by_filter = |c: &ClipFile| self.filter.shows(uploaded::is_marked(&self.uploaded, &c.path));
+        let uploaded_ok = |c: &ClipFile| self.filter.shows(uploaded::is_marked(&self.uploaded, &c.path));
+        // People (#69): clips where any of the picked people talk.
+        let people_ok = |c: &ClipFile| {
+            self.people.is_empty()
+                || self.talkers.get(&crate::speakers::key(&c.path)).is_some_and(|t| self.people.iter().any(|p| t.contains(p)))
+        };
+        let shown_by_filter = |c: &ClipFile| uploaded_ok(c) && people_ok(c);
         let shown: Vec<&ClipFile> = all.iter().filter(|c| shown_by_filter(c)).collect();
-        let hidden = all.len() - shown.len();
+        let hidden = all.iter().filter(|c| !uploaded_ok(c)).count();
+        let hidden_by_people = all.iter().filter(|c| uploaded_ok(c) && !people_ok(c)).count();
+        let uploaded_shown = all.iter().any(|c| uploaded_ok(c));
         let visible: Vec<ClipFile> = shown.iter().filter(|c| matches_search(c, &query, today)).map(|c| (*c).clone()).collect();
         // Search matches among the hidden clips, to point them out.
         let hidden_matches = if query.is_empty() {
@@ -310,11 +327,14 @@ impl ClipsPage {
                 let dir = snap.cfg.out_dir.display();
                 // "12 clips · 3 uploaded hidden · 1.4 MB". The folder is only
                 // named while there are no clips; Open folder is right here.
-                let hidden_note = match (hidden, self.filter) {
+                let mut hidden_note = match (hidden, self.filter) {
                     (0, _) | (_, Filter::All) => String::new(),
                     (n, Filter::NotUploaded) => format!(" · {n} uploaded hidden"),
                     (n, Filter::Uploaded) => format!(" · {n} not uploaded hidden"),
                 };
+                if hidden_by_people > 0 {
+                    hidden_note.push_str(&format!(" · {hidden_by_people} without {} hidden", self.people_label()));
+                }
                 let summary = match all.len() {
                     0 => format!("Saved in {dir}"),
                     1 => format!("1 clip{hidden_note} · {}", megabytes(total)),
@@ -331,8 +351,10 @@ impl ClipsPage {
                 ui.spacing_mut().item_spacing.x = 12.0;
                 // In its own area: its text field is placed with `put`, which
                 // would otherwise move the row's cursor back over the box.
-                let search_w = (ui.available_width() - 182.0).clamp(160.0, 360.0);
+                let search_w = (ui.available_width() - 2.0 * 182.0).clamp(160.0, 360.0);
                 ui.allocate_ui(vec2(search_w, 40.0), |ui| search_box(ui, &mut self.search));
+                ui.allocate_ui(vec2(170.0, 40.0), |ui| self.people_filter(ui, &all));
+                let people_open = self.people_open;
                 ui.allocate_ui(vec2(170.0, 40.0), |ui| {
                     let options: Vec<String> = Filter::ALL.iter().map(|f| f.label().to_string()).collect();
                     let selected = Filter::ALL.iter().position(|f| *f == self.filter);
@@ -341,7 +363,7 @@ impl ClipsPage {
                     }
                     // Its list is open: the arrow keys and Esc are its own.
                     let id = ui.make_persistent_id("clip-filter");
-                    ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false))
+                    ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false)) || people_open
                 })
                 .inner
             })
@@ -352,6 +374,11 @@ impl ClipsPage {
 
         if all.is_empty() {
             empty_state(ui, snap);
+        } else if shown.is_empty() && uploaded_shown {
+            // The People filter (#69) hides every clip the other filter shows.
+            if notice(ui, "None of the people you picked talk in these clips.", "Show everyone") {
+                self.people.clear();
+            }
         } else if shown.is_empty() {
             // The filter hides every clip.
             let (msg, show) = match self.filter {
@@ -392,6 +419,7 @@ impl ClipsPage {
             self.last_scan = Some(Instant::now());
             self.volumes = volumes::load();
             self.uploaded = uploaded::load();
+            self.load_talkers();
             let present: HashSet<&PathBuf> = self.clips.iter().map(|c| &c.path).collect();
             self.deleted.retain(|p| present.contains(p));
             self.queued.retain(|p, _| present.contains(p));
@@ -417,6 +445,189 @@ impl ClipsPage {
         } else if !p.is_paused() {
             // Smooth playhead.
             ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
+    /// Who talks in each clip (#66), for the People filter (#69): the same
+    /// cleaned-up segments the Edit dialog shows (#72), so a blip doesn't
+    /// count. Speech without a name isn't a person.
+    fn load_talkers(&mut self) {
+        use crate::speakers::{smoothed, MERGE_GAP, MIN_SEGMENT};
+        self.talkers = crate::speakers::load()
+            .into_iter()
+            .map(|(key, data)| (key, smoothed(&data.segments, MERGE_GAP, MIN_SEGMENT).into_iter().filter_map(|s| s.who).collect()))
+            .collect();
+        self.users = crate::speakers::load_users();
+    }
+
+    /// A person's name: "You", Discord's current name, or the stored one.
+    fn person_name(&self, who: &str, live: &HashMap<String, crate::discord_voice::User>) -> String {
+        if who == crate::speakers::YOU {
+            return "You".into();
+        }
+        live.get(who).map(|u| u.name.clone()).or_else(|| self.users.get(who).map(|u| u.name.clone())).unwrap_or_else(|| "Unknown".into())
+    }
+
+    /// "Everyone", "Bob" or "Bob + 2".
+    fn people_label(&self) -> String {
+        let live = crate::discord_voice::users();
+        match self.people.iter().next() {
+            None => "Everyone".into(),
+            Some(first) if self.people.len() == 1 => self.person_name(first, &live),
+            Some(first) => format!("{} + {}", self.person_name(first, &live), self.people.len() - 1),
+        }
+    }
+
+    /// The People filter (#69): a button saying who's picked (✕ clears it)
+    /// that opens a list of everyone who talks in the clips, with their
+    /// picture, name, number of clips and a checkbox.
+    fn people_filter(&mut self, ui: &mut Ui, all: &[ClipFile]) {
+        use crate::speakers::YOU;
+        let live = crate::discord_voice::users();
+        let own_id = crate::discord_voice::own_id();
+        // Everyone in these clips, most clips first.
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for c in all {
+            for who in self.talkers.get(&crate::speakers::key(&c.path)).into_iter().flatten() {
+                *counts.entry(who.clone()).or_default() += 1;
+            }
+        }
+        let mut people: Vec<(String, String, usize)> =
+            counts.into_iter().map(|(who, n)| (self.person_name(&who, &live), who, n)).collect();
+        people.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+        let enabled = !people.is_empty();
+
+        // The button, styled like the uploaded filter's dropdown.
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), if enabled { Sense::click() } else { Sense::hover() });
+        let clear_rect = Rect::from_center_size(pos2(rect.right() - 20.0, rect.center().y), vec2(24.0, 24.0));
+        let clear = (!self.people.is_empty())
+            .then(|| ui.interact(clear_rect, ui.make_persistent_id("people-clear"), Sense::click()).on_hover_text("Show everyone"));
+        let resp = if enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp.on_hover_text("Nobody is recorded talking in these clips yet") };
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(4), pal().bg_tertiary);
+        if self.people_open {
+            painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, BLURPLE), egui::StrokeKind::Inside);
+        } else if resp.hovered() {
+            painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, pal().bg_floating), egui::StrokeKind::Inside);
+        }
+        let label = self.people_label();
+        let mut job = egui::text::LayoutJob::simple_singleline(label, font(15.0, Weight::Regular), pal().text_normal);
+        job.wrap = egui::text::TextWrapping { max_width: rect.width() - 52.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+        let galley = painter.layout_job(job);
+        let color = if enabled { pal().text_normal } else { pal().text_muted };
+        painter.galley(pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0), galley, color);
+        match &clear {
+            // ✕ to clear the choice.
+            Some(c) => {
+                let col = if c.hovered() { pal().header_primary } else { pal().header_secondary };
+                let p = clear_rect.center();
+                painter.line_segment([p + vec2(-4.5, -4.5), p + vec2(4.5, 4.5)], Stroke::new(1.8, col));
+                painter.line_segment([p + vec2(-4.5, 4.5), p + vec2(4.5, -4.5)], Stroke::new(1.8, col));
+            }
+            // A chevron, like the dropdown.
+            None => {
+                let c = pos2(rect.right() - 20.0, rect.center().y);
+                let d = if self.people_open { -1.0 } else { 1.0 };
+                let s = Stroke::new(2.0, color);
+                painter.line_segment([c + vec2(-5.0, -2.5 * d), c + vec2(0.0, 2.5 * d)], s);
+                painter.line_segment([c + vec2(0.0, 2.5 * d), c + vec2(5.0, -2.5 * d)], s);
+            }
+        }
+        if clear.as_ref().is_some_and(|c| c.clicked()) {
+            self.people.clear();
+        } else if resp.clicked() {
+            self.people_open = !self.people_open;
+        }
+        if !enabled {
+            self.people_open = false;
+        }
+        if !self.people_open {
+            return;
+        }
+
+        // The list, below the button like Discord's menus.
+        let mut toggled: Option<Option<String>> = None; // Some(None): Everyone
+        let area = egui::Area::new(ui.make_persistent_id("people-list"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_bottom() + vec2(0.0, 4.0))
+            .show(ui.ctx(), |ui| {
+                Frame::new().fill(pal().bg_floating).corner_radius(CornerRadius::same(4)).inner_margin(Margin::same(6)).show(ui, |ui| {
+                    ui.set_width(rect.width().max(240.0));
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        let rows = std::iter::once(None).chain(people.iter().map(Some));
+                        for row in rows {
+                            let (r, rr) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+                            let rr = rr.on_hover_cursor(CursorIcon::PointingHand);
+                            if rr.hovered() {
+                                ui.painter().rect_filled(r, CornerRadius::same(3), pal().bg_hover);
+                            }
+                            let checked = match row {
+                                None => self.people.is_empty(),
+                                Some((_, who, _)) => self.people.contains(who),
+                            };
+                            // Checkbox.
+                            let b = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(18.0, 18.0));
+                            if checked {
+                                ui.painter().rect_filled(b, CornerRadius::same(4), BLURPLE);
+                                let s = Stroke::new(2.0, Color32::WHITE);
+                                ui.painter().line_segment([b.center() + vec2(-4.5, 0.0), b.center() + vec2(-1.5, 3.5)], s);
+                                ui.painter().line_segment([b.center() + vec2(-1.5, 3.5), b.center() + vec2(4.5, -3.5)], s);
+                            } else {
+                                ui.painter().rect_stroke(b, CornerRadius::same(4), Stroke::new(1.5, pal().text_muted), egui::StrokeKind::Inside);
+                            }
+                            let x = r.left() + 34.0;
+                            match row {
+                                None => {
+                                    ui.painter().text(pos2(x, r.center().y), Align2::LEFT_CENTER, "Everyone", font(14.0, Weight::Semibold), pal().text_normal);
+                                }
+                                Some((name, who, n)) => {
+                                    // Picture, ringed in the person's colour like in Edit.
+                                    let c = pos2(x + 10.0, r.center().y);
+                                    let color = super::edit::person_color(Some(who));
+                                    let id = if who == YOU { own_id.clone() } else { Some(who.clone()) };
+                                    let hash = id.as_ref().and_then(|id| {
+                                        live.get(id).and_then(|u| u.avatar.clone()).or_else(|| self.users.get(id).and_then(|u| u.avatar.clone()))
+                                    });
+                                    let tex = id.as_ref().and_then(|id| self.avatars.get(ui.ctx(), id, hash.as_deref())).map(|t| t.id());
+                                    match tex {
+                                        Some(t) => {
+                                            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                                            let pic = Rect::from_center_size(c, vec2(20.0, 20.0));
+                                            ui.painter().add(egui::epaint::RectShape::filled(pic, CornerRadius::same(10), Color32::WHITE).with_texture(t, uv));
+                                        }
+                                        None => {
+                                            ui.painter().circle_filled(c, 10.0, color.gamma_multiply(0.8));
+                                            let initial = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                            ui.painter().text(c, Align2::CENTER_CENTER, initial, font(11.0, Weight::Bold), Color32::WHITE);
+                                        }
+                                    }
+                                    ui.painter().circle_stroke(c, 10.5, Stroke::new(1.5, color));
+                                    ui.painter().text(pos2(x + 28.0, r.center().y), Align2::LEFT_CENTER, name, font(14.0, Weight::Semibold), pal().text_normal);
+                                    let count = if *n == 1 { "1 clip".to_string() } else { format!("{n} clips") };
+                                    ui.painter().text(pos2(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, count, font(12.0, Weight::Regular), pal().text_muted);
+                                }
+                            }
+                            if rr.clicked() {
+                                toggled = Some(row.map(|(_, who, _)| who.clone()));
+                            }
+                        }
+                    });
+                });
+            });
+        match toggled {
+            Some(None) => self.people.clear(),
+            Some(Some(who)) => {
+                if !self.people.remove(&who) {
+                    self.people.insert(who);
+                }
+            }
+            None => {
+                // A click anywhere else closes the list.
+                if area.response.clicked_elsewhere() && !resp.clicked() && ui.input(|i| i.pointer.any_click()) {
+                    self.people_open = false;
+                }
+            }
         }
     }
 
@@ -710,6 +921,10 @@ impl ClipsPage {
         if let Err(e) = uploaded::rename(from, to) {
             crate::log!("moving the uploaded mark of {} failed: {e:#}", from.display());
         }
+        // Who talked in it follows too (#66).
+        if let Err(e) = crate::speakers::rename(from, to) {
+            crate::log!("moving the speakers of {} failed: {e:#}", from.display());
+        }
         self.uploaded = uploaded::load();
         crate::tray::post_library_changed(); // renamed or replaced (#48)
     }
@@ -798,13 +1013,22 @@ impl ClipsPage {
                 }
                 let trimmed = start > 0.0 || end < 1.0;
                 let written = if trimmed { library::replace_with_trimmed(&path, start, end) } else { Ok(()) };
+                if trimmed && written.is_ok() {
+                    if let Err(e) = crate::speakers::trim(&path, &path, start, end) {
+                        crate::log!("trimming the speakers of {} failed: {e:#}", path.display());
+                    }
+                }
                 written.and_then(|()| volumes::set(&path, v)).map(|()| {
                     Some(if trimmed { "Saved. The original is in the Recycle Bin." } else { "Saved." }.to_string())
                 })
             }
             // The new clip gets these volumes; the original keeps its own.
-            Choice::SaveNew { start, end, volumes: v } => library::save_edited_copy(&path, start, end)
-                .and_then(|p| volumes::set(&p, v).map(|()| Some(format!("Saved as {}.", file_name(&p))))),
+            Choice::SaveNew { start, end, volumes: v } => library::save_edited_copy(&path, start, end).and_then(|p| {
+                if let Err(e) = crate::speakers::trim(&path, &p, start, end) {
+                    crate::log!("copying the speakers of {} failed: {e:#}", path.display());
+                }
+                volumes::set(&p, v).map(|()| Some(format!("Saved as {}.", file_name(&p))))
+            }),
         };
         match result {
             Ok(msg) => {

@@ -18,6 +18,7 @@ mod capture;
 mod clip;
 mod config;
 mod discord_theme;
+mod discord_voice;
 mod hotkey;
 mod icon;
 mod leveldb;
@@ -25,6 +26,7 @@ mod library;
 mod log;
 mod player;
 mod ringbuffer;
+mod speakers;
 mod tray;
 mod ui;
 mod update;
@@ -194,7 +196,8 @@ fn main() {
         warnings.push(msg);
     }
 
-    let ring_len = capture::SAMPLE_RATE as usize * capture::CHANNELS as usize * cfg.seconds as usize;
+    // The chosen length before the hotkey plus the seconds recorded after it (#64).
+    let ring_len = capture::SAMPLE_RATE as usize * capture::CHANNELS as usize * (cfg.seconds + clip::AFTER_SECONDS) as usize;
     let running = Arc::new(AtomicBool::new(true));
     let discord_ring = Arc::new(RingBuffer::new(ring_len));
 
@@ -229,6 +232,11 @@ fn main() {
 
     update::AUTO.store(cfg.check_updates, Ordering::SeqCst);
     update::spawn_auto_checker(Arc::clone(&running));
+    if cfg.speakers {
+        // Who's talking (#66): events as far back as a clip reaches, plus slack.
+        let keep = Duration::from_secs(u64::from(cfg.seconds + clip::AFTER_SECONDS) + 30);
+        discord_voice::spawn(Arc::clone(&running), keep);
+    }
 
     let discord_status = Arc::new(Mutex::new(DiscordStatus::Waiting));
     let supervisor = {

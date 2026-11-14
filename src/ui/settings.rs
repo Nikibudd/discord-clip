@@ -49,7 +49,11 @@ impl SettingsPage {
         // Recording
         section_label(ui, "Recording");
         let mut secs = self.seconds_drag.unwrap_or(cfg.seconds as f32);
-        row(ui, "Clip length", "How much audio each clip contains. Applies after a restart.", |ui| {
+        let desc = format!(
+            "How much audio before the hotkey each clip contains; it also keeps the {} s after it. Applies after a restart.",
+            crate::clip::AFTER_SECONDS
+        );
+        row(ui, "Clip length", &desc, |ui| {
             text(ui, format!("{} s", secs.round() as u32), 16.0, Weight::Semibold, pal().header_primary)
         });
         ui.add_space(8.0);
@@ -127,6 +131,14 @@ impl SettingsPage {
         if r.drag_stopped() || r.clicked() {
             self.gain_drag = None;
             set(Command::SetMicGain(gain));
+        }
+
+        ui.add_space(24.0);
+        // #66 / #67: who talked when, from Discord's voice status.
+        let speakers_desc = "Records who talks when in each clip, shown under the waveform in Edit. \
+            Reads only Discord's voice status, never your login. Turning it on applies after a restart.";
+        if row(ui, "Show who's talking", speakers_desc, |ui| toggle(ui, cfg.speakers)).clicked() {
+            set(Command::SetSpeakers(!cfg.speakers));
         }
 
         divider(ui);

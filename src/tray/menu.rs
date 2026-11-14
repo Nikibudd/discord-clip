@@ -4,7 +4,7 @@ use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use super::actions::{open_clips_folder, save_clip, shell_open};
+use super::actions::{open_clips_folder, request_clip, shell_open};
 use super::notify_icon::discord_line;
 use super::window::snapshot;
 use super::{quit, App, Exit};
@@ -63,7 +63,7 @@ pub(super) fn show_menu(app: &App) {
 pub(super) fn handle_command(app: &App, cmd: usize) {
     match cmd {
         ID_WINDOW => ui::open(snapshot(app)),
-        ID_SAVE => save_clip(app),
+        ID_SAVE => request_clip(app),
         ID_OPEN_FOLDER => open_clips_folder(app),
         ID_LOG => shell_open(&log::log_path()),
         ID_QUIT => {

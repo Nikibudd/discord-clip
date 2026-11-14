@@ -350,6 +350,7 @@ dependencies = [
  "hound",
  "libflac-rs",
  "ogg",
+ "png",
  "raw-window-handle",
  "ruopus",
  "semver",

@@ -2,7 +2,10 @@
 
 Instant-replay for Discord voice chat on Windows. Sits in the system tray,
 keeps the last N seconds of Discord audio in memory and saves it as a clip
-when you press the hotkey (**Ctrl+Alt+C** by default).
+when you press the hotkey (**Ctrl+Alt+C** by default). It keeps recording
+for 2 more seconds after the press, so a moment that happens just as you
+reach for the key isn't cut off: a 30 s clip is 30 s before the press plus
+2 s after.
 
 - **Other people:** captured with per-process WASAPI loopback of the Discord
   client, so only Discord audio is recorded (no game/music/browser audio).
@@ -123,6 +126,38 @@ Local Storage holds your Discord login token: it is never read, and nothing
 read is logged or copied anywhere. Only the theme is kept, in
 `discord-theme.txt` (below).
 
+## Who talked
+
+With `speakers = true` (the default), each saved clip also records **who
+talked when**: your own speech from the mic track, and everyone else's from
+Discord's speaking status, matched to the speech in the audio. People are
+stored by their Discord user id, so a new name doesn't make a new person.
+Turn it on or off in **Settings → Recording → Show who's talking**.
+
+The **Edit dialog** shows it under the waveform: a row per person with their
+profile picture and current name, and a dot where they start and stop
+talking, joined by a line, on the waveform's time axis (your own row is
+**You**; speech without a name is **Other**). Hover a line for the times,
+click it to play from there.
+
+**How, without logging in:**
+- **Which voice channel you're in:** only the voice connection lines of
+  Discord's own log, `%APPDATA%\discord\logs\renderer_js.log`. Joining,
+  switching and leaving are written as they happen. The fallback is one more
+  exact Local Storage key, `SelectedChannelStore`.
+- **Who's speaking:** Discord's local RPC pipe, the same one Rich Presence
+  uses, as Discord Clip's own Discord application (no secret, no OAuth). It
+  gives speaking start/stop events for that channel and the names and avatars
+  of the people in it.
+
+- **Profile pictures:** downloaded from Discord's public image server
+  (`cdn.discordapp.com`), the same pictures Discord shows you, and cached in
+  `%LOCALAPPDATA%\discord-clip\avatars`.
+
+Your login token is never read, nothing is sent anywhere, and nothing about
+other people is logged. Discord doesn't document this way of reading the
+speaking status: if an update breaks it, clips just save without names.
+
 ## Updates
 
 With `check_updates = true` (the default) the app checks GitHub 20 seconds
@@ -168,6 +203,7 @@ out_dir = C:\Users\you\Music\Discord Clips   # full path; %USERPROFILE% etc. all
 clipboard = true
 notifications = true
 check_updates = true         # look for new versions (never installs without asking)
+speakers = true              # record who talks when in each clip (see Who talked)
 theme = discord              # discord (follow Discord), dark or light
 ```
 
@@ -184,6 +220,8 @@ Each is a small text file, rewritten as things change:
 | `clip-volumes.txt` | Track volumes set in the Edit dialog, per clip |
 | `clip-uploaded.txt` | Clips marked as uploaded |
 | `discord-theme.txt` | The last Discord theme read, used until the next read works |
+| `clip-speakers.json` | Who talked when in each clip, by Discord user id |
+| `discord-users.json` | Names and avatar ids of the people in your clips, by user id |
 
 ## Releases
 
@@ -265,7 +303,7 @@ it from the tray before copying a new build over it).
 | --- | --- |
 | `src/main.rs` | Startup, single-instance check, CLI overrides, Discord supervisor thread |
 | `src/tray/` | The tray app (main thread): `mod.rs` app state + message loop, `notify_icon.rs` tray icon/tooltip (incl. the clips line)/notifications, `menu.rs` right-click menu, `global_hotkey.rs` save-clip hotkey, `actions.rs` saving clips, opening folders, opening a saved clip in the window, `window.rs` snapshot/commands for the window, folder picker, update hand-off |
-| `src/ui/` | The window (egui, own thread): `mod.rs` command/snapshot API + window lifecycle, `theme.rs` Discord colours/fonts, the palette that follows Discord and the gradient backdrop, `follow.rs` watching and reading Discord's theme, `widgets.rs` buttons/toggles/sliders/dropdowns, `sidebar.rs` page list + status card, `keybind.rs` hotkey recorder, `edit.rs` Edit dialog, `confirm.rs` confirm dialog, one file per page (`clips.rs`, `settings.rs`, `updates.rs`) |
+| `src/ui/` | The window (egui, own thread): `mod.rs` command/snapshot API + window lifecycle, `theme.rs` Discord colours/fonts, the palette that follows Discord and the gradient backdrop, `follow.rs` watching and reading Discord's theme, `widgets.rs` buttons/toggles/sliders/dropdowns, `sidebar.rs` page list + status card, `keybind.rs` hotkey recorder, `edit.rs` Edit dialog (incl. the people who talk), `avatars.rs` Discord profile pictures (download, disk cache, PNG decode), `confirm.rs` confirm dialog, one file per page (`clips.rs`, `settings.rs`, `updates.rs`) |
 | `src/icon.rs` | The app icon, drawn in code: at runtime for the tray and window, and at build time for the exe |
 | `build.rs` | Embeds the icon and version info in the exe (`winresource`), so the taskbar, Start menu and Explorer show it |
 | `src/autostart.rs` | "Start with Windows": the `Discord Clip` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (same as the installer), incl. Task Manager's Startup apps switch |
@@ -281,5 +319,7 @@ it from the tray before copying a new build over it).
 | `src/uploaded.rs` | Uploaded marks (`clip-uploaded.txt`) |
 | `src/discord_theme.rs` | Reads Discord's theme from `settings.json` and exact Local Storage keys (never anything else), remembers it in `discord-theme.txt` |
 | `src/leveldb.rs` | A minimal read-only LevelDB reader for Discord's Local Storage |
+| `src/discord_voice.rs` | Who's talking in your call: the voice channel from Discord's log (or `SelectedChannelStore`), speaking events and names over the local RPC pipe |
+| `src/speakers.rs` | Who talked when in each clip: speech detection on the tracks, matching it to the speaking events, `clip-speakers.json` + `discord-users.json` |
 | `src/player.rs` | Clip playback with pause and seeking (`waveOut`) |
 | `src/log.rs` | Log file |
