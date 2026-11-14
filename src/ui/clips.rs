@@ -30,6 +30,9 @@ const RESCAN_EVERY: Duration = Duration::from_secs(2);
 const TILE_MIN_WIDTH: f32 = 250.0;
 const TILE_HEIGHT: f32 = 186.0;
 const GAP: f32 = 16.0;
+/// The page's widest layout: six cards of 300 px. A wider window leaves the
+/// rest empty rather than stretch the cards (#45).
+pub(super) const MAX_WIDTH: f32 = 6.0 * 300.0 + 5.0 * GAP;
 
 type Analyses = Arc<Mutex<HashMap<PathBuf, (SystemTime, Result<Analysis, String>)>>>;
 
@@ -641,7 +644,8 @@ fn empty_state(ui: &mut Ui, snap: &Snapshot) {
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(24))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+            // A box of text: keep the reading width of the other pages.
+            ui.set_width(ui.available_width().min(super::READING_WIDTH - 48.0));
             text(ui, "No clips yet", 16.0, Weight::Semibold, pal().header_primary);
             ui.add_space(6.0);
             text(

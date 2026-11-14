@@ -315,6 +315,8 @@ fn set(cmd: Command) {
 }
 
 const SIDEBAR_WIDTH: f32 = 220.0;
+/// Pages of text stay this narrow: long lines are hard to read.
+const READING_WIDTH: f32 = 700.0;
 
 impl eframe::App for ClipWindow {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -360,7 +362,9 @@ impl eframe::App for ClipWindow {
             // Each page keeps its own scroll position.
             egui::ScrollArea::vertical().id_salt(self.page).auto_shrink(false).show(ui, |ui| {
                 Frame::new().inner_margin(Margin { left: 40, right: 40, top: 40, bottom: 40 }).show(ui, |ui| {
-                    ui.set_max_width(ui.available_width().min(700.0));
+                    // Text pages keep a reading width; the clips grid uses the window (#45).
+                    let max = if self.page == Page::Clips { clips::MAX_WIDTH } else { READING_WIDTH };
+                    ui.set_max_width(ui.available_width().min(max));
                     match self.page {
                         Page::Clips => self.clips.show(ui, &snap),
                         Page::Settings => self.settings.show(ui, &snap, &self.theme),
