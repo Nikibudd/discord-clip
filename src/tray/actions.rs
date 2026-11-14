@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::UI::WindowsAndMessaging::{MB_ICONHAND, MB_OK, SW_SHOWNORMAL};
+use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer, MB_ICONHAND, MB_OK, SW_SHOWNORMAL};
 use windows::Win32::UI::Shell::ShellExecuteW;
 
 use super::notify_icon::notify;
@@ -16,11 +16,35 @@ pub(super) fn open_clips_folder(app: &App) {
     shell_open(&dir);
 }
 
-pub(super) fn save_clip(app: &App) {
+/// The hotkey or "Save clip now": beep right away, keep recording for
+/// `clip::AFTER_SECONDS`, then save (#64). Pressing again meanwhile does
+/// nothing: that moment is already in the clip.
+pub(super) fn request_clip(app: &App) {
+    if app.clip_pending.get() {
+        return;
+    }
+    app.clip_pending.set(true);
+    beep(true);
+    unsafe {
+        SetTimer(app.hwnd.get(), super::CLIP_TIMER, crate::clip::AFTER_SECONDS * 1000, None);
+    }
+}
+
+/// Saves the clip a `request_clip` is waiting for, if any: when its timer
+/// fires, or early when the app quits.
+pub(super) fn finish_clip(app: &App) {
+    unsafe {
+        let _ = KillTimer(app.hwnd.get(), super::CLIP_TIMER);
+    }
+    if app.clip_pending.replace(false) {
+        save_clip(app);
+    }
+}
+
+fn save_clip(app: &App) {
     let cfg = app.cfg.borrow().clone();
     match crate::clip::save(&cfg, &app.discord_ring, app.mic_ring.as_deref()) {
         Ok(path) => {
-            beep(true);
             log!("saved clip {}", path.display());
             let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let mut text = name;

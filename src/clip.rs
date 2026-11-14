@@ -14,6 +14,11 @@ use crate::ringbuffer::RingBuffer;
 /// then mic L/R.
 pub const TRACK_CHANNELS: u16 = 4;
 
+/// Recording goes on this long after the hotkey (#64): the moment often
+/// happens just as the key is pressed. A clip is the chosen length before
+/// the press plus this, so the buffers hold that much.
+pub const AFTER_SECONDS: u32 = 2;
+
 /// Snapshots the buffers and writes a timestamped clip in the configured
 /// format into the clips folder: with the mic and `separate_tracks` on (and
 /// a format that can hold them), a 4-channel file (Discord L/R + mic L/R);
