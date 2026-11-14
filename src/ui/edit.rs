@@ -599,7 +599,7 @@ fn load_speakers(clip: &ClipFile) -> Option<ClipSpeakers> {
 
 /// A person's colour, the same in every clip: from their user id. You are
 /// green, speech without a name gray.
-fn person_color(who: Option<&str>) -> Color32 {
+pub(super) fn person_color(who: Option<&str>) -> Color32 {
     const COLORS: [Color32; 7] = [
         Color32::from_rgb(0x00, 0xA8, 0xFC), // blue
         Color32::from_rgb(0xEB, 0x45, 0x9E), // fuchsia
