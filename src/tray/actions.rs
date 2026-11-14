@@ -39,6 +39,7 @@ pub(super) fn save_clip(app: &App) {
             *app.last_clip.borrow_mut() = Some(path);
             app.balloon.set(Balloon::ShowClip);
             notify(app, "Clip saved", &text, false);
+            super::tray_update(app); // the tooltip's clip count (#48)
         }
         Err(e) => {
             beep(false);

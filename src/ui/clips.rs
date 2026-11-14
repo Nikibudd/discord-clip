@@ -21,7 +21,7 @@ use eframe::egui::{
 use super::theme::*;
 use super::widgets::*;
 use super::{send, Command, Snapshot};
-use crate::library::{self, Analysis, ClipFile, SavedAt};
+use crate::library::{self, days_from_civil, Analysis, ClipFile, SavedAt};
 use crate::player::Playback;
 use crate::uploaded;
 use crate::volumes::{self, Volumes};
@@ -647,6 +647,7 @@ impl ClipsPage {
             self.toast = Some((format!("Couldn't save the mark: {e:#}"), Instant::now()));
         }
         self.uploaded = uploaded::load();
+        crate::tray::post_library_changed(); // the tooltip's count (#48)
     }
 
     /// The clip moved to `to` (renamed or replaced): its uploaded mark follows.
@@ -655,6 +656,7 @@ impl ClipsPage {
             crate::log!("moving the uploaded mark of {} failed: {e:#}", from.display());
         }
         self.uploaded = uploaded::load();
+        crate::tray::post_library_changed(); // renamed or replaced (#48)
     }
 
     /// Opens the Edit dialog to pick the part for the soundboard.
@@ -757,6 +759,7 @@ impl ClipsPage {
                     self.toast = Some((msg, Instant::now()));
                     self.volumes = volumes::load();
                     self.last_scan = None; // show the new / changed clip now
+                    crate::tray::post_library_changed(); // e.g. saved as a new clip (#48)
                 }
             }
             Err(e) => {
@@ -1329,18 +1332,6 @@ pub(super) fn when(s: SavedAt, today: i32) -> String {
 pub(super) fn today() -> i32 {
     let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
     days_from_civil(t.wYear as i32, t.wMonth as u32, t.wDay as u32)
-}
-
-/// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
-/// algorithm), so dates can be compared and subtracted.
-fn days_from_civil(y: i32, m: u32, d: u32) -> i32 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u32;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe as i32 - 719_468
 }
 
 #[cfg(test)]

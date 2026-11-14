@@ -14,6 +14,80 @@ use crate::volumes::Volumes;
 /// Number of bars in a clip's waveform.
 pub const WAVEFORM_BARS: usize = 48;
 
+/// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
+/// algorithm), so dates can be compared and subtracted.
+pub fn days_from_civil(y: i32, m: u32, d: u32) -> i32 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i32 - 719_468
+}
+
+impl SavedAt {
+    /// The local date and time now.
+    pub fn now() -> SavedAt {
+        let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+        SavedAt {
+            year: t.wYear,
+            month: t.wMonth as u8,
+            day: t.wDay as u8,
+            hour: t.wHour as u8,
+            minute: t.wMinute as u8,
+            second: t.wSecond as u8,
+        }
+    }
+
+    fn day_number(&self) -> i32 {
+        days_from_civil(self.year as i32, self.month as u32, self.day as u32)
+    }
+
+    /// Seconds since 1970-01-01 in local time, to subtract two of them.
+    fn seconds(&self) -> i64 {
+        self.day_number() as i64 * 86_400 + self.hour as i64 * 3600 + self.minute as i64 * 60 + self.second as i64
+    }
+}
+
+/// The parts of the tray tooltip's clips line (#48), most important first:
+/// "12 clips", "3 not uploaded", "last saved 2 min ago". Leaves out the
+/// uploaded count when no clip (or none of them) is marked, and the last
+/// save when no clip has a date in its name. Cheap: a folder listing and
+/// the marks, no clip is read.
+pub fn summary(clips: &[ClipFile], uploaded: &crate::uploaded::Set, now: SavedAt) -> Vec<String> {
+    if clips.is_empty() {
+        return vec!["No clips yet".into()];
+    }
+    let mut parts = vec![match clips.len() {
+        1 => "1 clip".to_string(),
+        n => format!("{n} clips"),
+    }];
+    let not_uploaded = clips.iter().filter(|c| !crate::uploaded::is_marked(uploaded, &c.path)).count();
+    if not_uploaded > 0 && not_uploaded < clips.len() {
+        parts.push(format!("{not_uploaded} not uploaded"));
+    }
+    if let Some(last) = clips.iter().filter_map(|c| c.saved).max() {
+        parts.push(format!("last saved {}", ago(last, now)));
+    }
+    parts
+}
+
+/// "just now", "2 min ago", "today 21:14", "yesterday 21:14", "12 Nov".
+fn ago(then: SavedAt, now: SavedAt) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    // Also a clip "from the future" (the clock was changed): just now.
+    let secs = now.seconds() - then.seconds();
+    let time = format!("{:02}:{:02}", then.hour, then.minute);
+    match now.day_number() - then.day_number() {
+        _ if secs < 60 => "just now".into(),
+        _ if secs < 3600 => format!("{} min ago", secs / 60),
+        0 => format!("today {time}"),
+        1 => format!("yesterday {time}"),
+        _ => format!("{} {}", then.day, MONTHS[(then.month.clamp(1, 12) - 1) as usize]),
+    }
+}
+
 /// A clip file in the clips folder (cheap to get: no file contents read).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipFile {
@@ -572,6 +646,46 @@ pub fn recycle(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at(day: u8, hour: u8, minute: u8, second: u8) -> SavedAt {
+        SavedAt { year: 2026, month: 11, day, hour, minute, second }
+    }
+
+    #[test]
+    fn says_when_the_last_clip_was_saved() {
+        let now = at(14, 21, 30, 0);
+        assert_eq!(ago(at(14, 21, 29, 30), now), "just now");
+        assert_eq!(ago(at(14, 21, 31, 0), now), "just now"); // clock changed
+        assert_eq!(ago(at(14, 21, 28, 0), now), "2 min ago");
+        assert_eq!(ago(at(14, 20, 31, 0), now), "59 min ago");
+        assert_eq!(ago(at(14, 9, 5, 0), now), "today 09:05");
+        assert_eq!(ago(at(13, 23, 59, 0), now), "yesterday 23:59");
+        assert_eq!(ago(at(2, 8, 0, 0), now), "2 Nov");
+        // Just after midnight, a clip from 23:50 is minutes ago, not "yesterday".
+        assert_eq!(ago(at(13, 23, 50, 0), at(14, 0, 5, 0)), "15 min ago");
+    }
+
+    #[test]
+    fn summarises_the_clips_for_the_tooltip() {
+        let clip = |name: &str, saved: Option<SavedAt>| ClipFile {
+            path: PathBuf::from(format!("C:\\clips\\{name}.wav")),
+            size: 1,
+            modified: SystemTime::UNIX_EPOCH,
+            saved,
+            name: None,
+        };
+        let now = at(14, 21, 30, 0);
+        let none = crate::uploaded::Set::new();
+        assert_eq!(summary(&[], &none, now), ["No clips yet"]);
+        let clips = [clip("a", Some(at(14, 21, 28, 0))), clip("b", Some(at(13, 8, 0, 0))), clip("c", None)];
+        // Nothing marked: no uploaded count.
+        assert_eq!(summary(&clips, &none, now), ["3 clips", "last saved 2 min ago"]);
+        let mut marked = crate::uploaded::Set::new();
+        marked.insert(clips[1].path.to_string_lossy().to_lowercase()); // as `uploaded` keys it
+        assert_eq!(summary(&clips, &marked, now), ["3 clips", "2 not uploaded", "last saved 2 min ago"]);
+        // One clip without a date in its name: no last save.
+        assert_eq!(summary(&clips[2..], &none, now), ["1 clip"]);
+    }
 
     #[test]
     fn parses_clip_names() {
