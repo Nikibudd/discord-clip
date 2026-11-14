@@ -65,7 +65,7 @@ pub fn users_path() -> PathBuf {
 }
 
 /// Windows paths are case-insensitive.
-fn key(path: &Path) -> String {
+pub fn key(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
 }
 
