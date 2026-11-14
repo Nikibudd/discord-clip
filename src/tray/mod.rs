@@ -31,7 +31,7 @@ use crate::config::Config;
 use crate::log;
 use crate::ringbuffer::RingBuffer;
 use crate::ui;
-use actions::{save_clip, show_last_clip};
+use actions::{open_last_clip, save_clip};
 use global_hotkey::{register_hotkey, unregister_hotkey, HOTKEY_ID};
 use notify_icon::{make_icon, notify, notify_always, tray_add, tray_remove, tray_update};
 use window::{handle_ui_command, install_update, notify_update_available, snapshot};
@@ -40,6 +40,10 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_STATUS: u32 = WM_APP + 2;
 const WM_UI_COMMAND: u32 = WM_APP + 3;
 const WM_UPDATE_READY: u32 = WM_APP + 4;
+const WM_LIBRARY_CHANGED: u32 = WM_APP + 5;
+/// Refreshes the tooltip's clips line ("last saved 2 min ago", and changes
+/// made in Explorer) once a minute (#48).
+const TOOLTIP_TIMER: usize = 1;
 const NIN_BALLOONUSERCLICK: u32 = WM_USER + 5;
 
 /// Main window, for other threads to post status updates to.
@@ -62,6 +66,12 @@ pub fn post_status_changed() {
 /// Tells the tray thread the window has queued commands. Callable from any thread.
 pub fn post_ui_command() {
     post(WM_UI_COMMAND);
+}
+
+/// Tells the tray thread the window changed the clips (renamed one, changed
+/// an uploaded mark, ...), so the tooltip's count is updated. Callable from any thread.
+pub fn post_library_changed() {
+    post(WM_LIBRARY_CHANGED);
 }
 
 /// Tells the tray thread a downloaded update is ready to install. Callable from any thread.
@@ -211,6 +221,7 @@ pub fn run(app: App) -> anyhow::Result<Exit> {
         MAIN_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
 
         tray_add(&app);
+        SetTimer(hwnd, TOOLTIP_TIMER, 60_000, None);
         register_hotkey(&app);
         window::refresh_mics(&app);
 
@@ -271,7 +282,7 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
             WM_LBUTTONUP => ui::open(snapshot(&app)),
             WM_RBUTTONUP | WM_CONTEXTMENU => menu::show_menu(&app),
             NIN_BALLOONUSERCLICK => match app.balloon.get() {
-                Balloon::ShowClip => show_last_clip(&app),
+                Balloon::ShowClip => open_last_clip(&app),
                 Balloon::OpenUpdates => ui::open_page(snapshot(&app), ui::Page::Updates),
             },
             _ => {}
@@ -287,7 +298,10 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                 handle_ui_command(&app, cmd);
             }
             ui::publish(snapshot(&app));
+            tray_update(&app); // e.g. a clip was deleted
         }
+        WM_LIBRARY_CHANGED => tray_update(&app),
+        WM_TIMER if wparam.0 == TOOLTIP_TIMER => tray_update(&app),
         WM_DESTROY => {
             unregister_hotkey(&app);
             tray_remove(&app);

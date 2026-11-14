@@ -50,11 +50,40 @@ pub(super) fn tray_nid(app: &App) -> NOTIFYICONDATAW {
     nid.uCallbackMessage = WM_TRAY;
     nid.hIcon = if active { app.icon_active.get() } else { app.icon_idle.get() };
     let short = if active { "Discord: capturing" } else { "Discord: waiting" };
-    copy_wide(
-        &mut nid.szTip,
-        &format!("Discord Clip\n{} saves the last {}s\n{short}", cfg.hotkey, app.running_seconds),
-    );
+    let head = format!("Discord Clip\n{} saves the last {}s\n{short}", cfg.hotkey, app.running_seconds);
+    // The clips line (#48): a folder listing and the marks, nothing decoded.
+    let clips = crate::library::scan(&cfg.out_dir);
+    let parts = crate::library::summary(&clips, &crate::uploaded::load(), crate::library::SavedAt::now());
+    let text = tooltip(&head, &parts, nid.szTip.len() - 1);
+    copy_wide(&mut nid.szTip, &text);
     nid
+}
+
+/// The tooltip: `head`, then as many of the clips line's `parts` as fit in
+/// `max` characters (UTF-16), dropping the least important ones first.
+fn tooltip(head: &str, parts: &[String], max: usize) -> String {
+    let fits = |s: &str| s.encode_utf16().count() <= max;
+    for n in (1..=parts.len()).rev() {
+        let s = format!("{head}\n{}", parts[..n].join(" · "));
+        if fits(&s) {
+            return s;
+        }
+    }
+    head.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tooltip_drops_parts_that_dont_fit() {
+        let parts = ["12 clips".to_string(), "3 not uploaded".into(), "last saved just now".into()];
+        assert_eq!(tooltip("Head", &parts, 127), "Head\n12 clips · 3 not uploaded · last saved just now");
+        assert_eq!(tooltip("Head", &parts, 30), "Head\n12 clips · 3 not uploaded");
+        assert_eq!(tooltip("Head", &parts, 14), "Head\n12 clips");
+        assert_eq!(tooltip("Head", &parts, 10), "Head");
+    }
 }
 
 pub(super) fn tray_add(app: &App) {
