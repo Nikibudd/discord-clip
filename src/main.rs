@@ -18,6 +18,7 @@ mod capture;
 mod clip;
 mod config;
 mod discord_theme;
+mod discord_voice;
 mod hotkey;
 mod icon;
 mod leveldb;
@@ -25,6 +26,7 @@ mod library;
 mod log;
 mod player;
 mod ringbuffer;
+mod speakers;
 mod tray;
 mod ui;
 mod update;
@@ -230,6 +232,11 @@ fn main() {
 
     update::AUTO.store(cfg.check_updates, Ordering::SeqCst);
     update::spawn_auto_checker(Arc::clone(&running));
+    if cfg.speakers {
+        // Who's talking (#66): events as far back as a clip reaches, plus slack.
+        let keep = Duration::from_secs(u64::from(cfg.seconds + clip::AFTER_SECONDS) + 30);
+        discord_voice::spawn(Arc::clone(&running), keep);
+    }
 
     let discord_status = Arc::new(Mutex::new(DiscordStatus::Waiting));
     let supervisor = {

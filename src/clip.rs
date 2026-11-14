@@ -23,7 +23,7 @@ pub const AFTER_SECONDS: u32 = 2;
 /// format into the clips folder: with the mic and `separate_tracks` on (and
 /// a format that can hold them), a 4-channel file (Discord L/R + mic L/R);
 /// otherwise both mixed into stereo.
-pub fn save(cfg: &Config, discord: &RingBuffer, mic: Option<&RingBuffer>) -> Result<PathBuf> {
+pub fn save(cfg: &Config, discord: &RingBuffer, mic: Option<&RingBuffer>) -> Result<Saved> {
     let discord = discord.snapshot();
     let mic_samples = mic.map(|m| m.snapshot()).unwrap_or_default();
     if discord.is_empty() && mic_samples.is_empty() {
@@ -39,7 +39,15 @@ pub fn save(cfg: &Config, discord: &RingBuffer, mic: Option<&RingBuffer>) -> Res
         Audio { samples: mix(&[(&discord, 1.0), (&mic_samples, cfg.mic_gain)]), channels: CHANNELS, rate: SAMPLE_RATE }
     };
     crate::audio::write(&path, &audio, cfg.format)?;
-    Ok(path)
+    Ok(Saved { path, discord, mic: mic_samples })
+}
+
+/// A clip just saved, with the tracks it was made from (stereo, at
+/// `SAMPLE_RATE`, aligned at their end), e.g. to find who talked (#66).
+pub struct Saved {
+    pub path: PathBuf,
+    pub discord: Vec<f32>,
+    pub mic: Vec<f32>,
 }
 
 /// Puts two stereo tracks side by side as 4 channels (`a` L/R, `b` L/R),

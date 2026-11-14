@@ -43,9 +43,19 @@ pub(super) fn finish_clip(app: &App) {
 
 fn save_clip(app: &App) {
     let cfg = app.cfg.borrow().clone();
+    // The buffers end now: speaking events are matched against this.
+    let end = std::time::Instant::now();
     match crate::clip::save(&cfg, &app.discord_ring, app.mic_ring.as_deref()) {
-        Ok(path) => {
+        Ok(saved) => {
+            let path = saved.path;
             log!("saved clip {}", path.display());
+            // Who talked when (#66). Only on with the speakers setting, which
+            // also starts the listener.
+            if cfg.speakers {
+                if let Err(e) = crate::speakers::record(&path, &saved.discord, &saved.mic, crate::capture::SAMPLE_RATE, end) {
+                    log!("saving who talked in {}: {e:#}", path.display());
+                }
+            }
             let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let mut text = name;
             if cfg.clipboard {

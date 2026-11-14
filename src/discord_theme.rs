@@ -169,6 +169,21 @@ fn read_from(dir: &Path) -> Option<DiscordTheme> {
     Some(DiscordTheme { base, tint, saturation })
 }
 
+/// The voice channel Discord last saved as the one you're in (#66), from
+/// one more exact key, `SelectedChannelStore` (same rules as above: only
+/// this key is read, only the channel id is taken). Chromium writes Local
+/// Storage about once a minute, so this can lag; `discord_voice` prefers
+/// Discord's log and uses this as a fallback. `Some(None)`: not in a call.
+pub fn selected_voice_channel() -> Option<Option<String>> {
+    let dir = discord_dir()?;
+    let mut key = KEY_PREFIX.to_vec();
+    key.extend_from_slice(b"SelectedChannelStore");
+    let store = crate::leveldb::read(&leveldb_dir(&dir), &|k: &[u8]| k == key.as_slice()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&storage_text(store.get(&key)?)?).ok()?;
+    let id = v.get("selectedVoiceChannelId").or_else(|| v.pointer("/_state/selectedVoiceChannelId"))?;
+    Some(id.as_str().map(str::to_string))
+}
+
 /// Chromium stores Local Storage values with a leading format byte: 1 =
 /// Latin-1, 0 = UTF-16LE.
 fn storage_text(value: &[u8]) -> Option<String> {
