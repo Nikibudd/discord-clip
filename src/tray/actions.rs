@@ -35,7 +35,7 @@ pub(super) fn save_clip(app: &App) {
                     }
                 }
             }
-            text.push_str("\nClick to show it in its folder.");
+            text.push_str("\nClick to open it in Discord Clip.");
             *app.last_clip.borrow_mut() = Some(path);
             app.balloon.set(Balloon::ShowClip);
             notify(app, "Clip saved", &text, false);
@@ -49,9 +49,13 @@ pub(super) fn save_clip(app: &App) {
     }
 }
 
-pub(super) fn show_last_clip(app: &App) {
-    if let Some(path) = app.last_clip.borrow().clone() {
-        show_in_folder(&path);
+/// Clicked the "Clip saved" notification: open the window on the Clips
+/// page, pointing out the clip (#50). Show in Explorer is in its ⋯ menu.
+pub(super) fn open_last_clip(app: &App) {
+    let snap = super::window::snapshot(app);
+    match app.last_clip.borrow().clone() {
+        Some(path) => crate::ui::open_clip(snap, path),
+        None => crate::ui::open_page(snap, crate::ui::Page::Clips),
     }
 }
 

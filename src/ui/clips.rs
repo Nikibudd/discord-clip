@@ -69,7 +69,14 @@ pub struct ClipsPage {
     /// Scroll the selected card into view when it's next drawn (moved with
     /// the arrow keys).
     scroll_to_selected: bool,
+    /// A clip to scroll to and highlight once the list has it (#50).
+    focus: Option<PathBuf>,
+    /// The highlighted card and when it was highlighted (fades out).
+    highlight: Option<(PathBuf, Instant)>,
 }
+
+/// How long a highlighted card takes to fade back (#50).
+const HIGHLIGHT_SECS: f32 = 2.0;
 
 /// What a confirm dialog does once confirmed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -225,6 +232,41 @@ impl ClipsPage {
         self.menu = None;
     }
 
+    /// Scroll to `clip` and highlight it, e.g. a clip just saved (#50).
+    /// Rescans first, as the list may not have it yet.
+    pub fn focus(&mut self, clip: PathBuf) {
+        self.focus = Some(clip);
+        self.last_scan = None;
+    }
+
+    /// Carries out a pending `focus` once the list is fresh: makes sure the
+    /// clip is shown (clearing the search, or leaving the Uploaded filter),
+    /// then selects, scrolls to and highlights it. A clip that's gone by
+    /// now is dropped quietly.
+    fn resolve_focus(&mut self, all: &[ClipFile], visible: &[ClipFile], today: i32) {
+        let Some(path) = self.focus.clone() else { return };
+        let Some(clip) = all.iter().find(|c| c.path == path) else {
+            self.focus = None;
+            return;
+        };
+        if !visible.iter().any(|c| c.path == path) {
+            if !matches_search(clip, &self.search.trim().to_lowercase(), today) {
+                self.search.clear();
+            }
+            if !self.filter.shows(uploaded::is_marked(&self.uploaded, &path)) {
+                self.filter = Filter::NotUploaded;
+                if !self.filter.shows(uploaded::is_marked(&self.uploaded, &path)) {
+                    self.filter = Filter::All;
+                }
+            }
+            return; // shown from the next frame on
+        }
+        self.focus = None;
+        self.selected = Some(path.clone());
+        self.scroll_to_selected = true;
+        self.highlight = Some((path, Instant::now()));
+    }
+
     fn is_loaded(&self, clip: &ClipFile) -> bool {
         self.player.as_ref().is_some_and(|p| p.path() == clip.path)
     }
@@ -252,6 +294,7 @@ impl ClipsPage {
         } else {
             all.iter().filter(|c| !shown_by_filter(c) && matches_search(c, &query, today)).count()
         };
+        self.resolve_focus(&all, &visible, today);
 
         // Header
         let width = ui.available_width();
@@ -455,6 +498,9 @@ impl ClipsPage {
         let width = ui.available_width();
         let cols = columns(width);
         let tile_w = (width - GAP * (cols - 1) as f32) / cols as f32;
+        if self.highlight.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() >= HIGHLIGHT_SECS) {
+            self.highlight = None; // faded out
+        }
         let analyses = self.analyses.lock().unwrap().clone();
 
         for row in clips.chunks(cols) {
@@ -485,7 +531,15 @@ impl ClipsPage {
                 if ui.input(|i| i.pointer.primary_pressed()) && ui.rect_contains_pointer(rect) {
                     self.selected = Some(clip.path.clone());
                 }
-                let card = Card { view, menu_open, custom_mix, uploaded, selected };
+                // Just pointed out (#50): fades from 1 to 0.
+                let highlight = match &self.highlight {
+                    Some((p, at)) if *p == clip.path => {
+                        ui.ctx().request_repaint();
+                        (1.0 - at.elapsed().as_secs_f32() / HIGHLIGHT_SECS).max(0.0)
+                    }
+                    _ => 0.0,
+                };
+                let card = Card { view, menu_open, custom_mix, uploaded, selected, highlight };
                 if let Some(action) = tile(ui, rect, clip, analysis, card, editing, today) {
                     self.act(action, clip);
                 }
@@ -865,6 +919,8 @@ struct Card {
     uploaded: bool,
     /// Selected for the keyboard shortcuts (#47).
     selected: bool,
+    /// Just pointed out (#50), fading from 1 to 0.
+    highlight: f32,
 }
 
 /// Draws one card and returns what the user clicked.
@@ -877,14 +933,19 @@ fn tile(
     editing: Option<&mut String>,
     today: i32,
 ) -> Option<Action> {
-    let Card { view, menu_open, custom_mix, uploaded, selected } = card_state;
+    let Card { view, menu_open, custom_mix, uploaded, selected, highlight } = card_state;
     let id = ui.make_persistent_id(("clip", &clip.path));
     let card = ui.interact(rect, id, Sense::hover());
     let fill = if card.hovered() { mix(pal().bg_secondary, pal().bg_hover, 0.6) } else { pal().bg_secondary };
+    // A just-saved clip glows blurple for a moment (#50).
+    let fill = if highlight > 0.0 { mix(fill, BLURPLE, 0.25 * highlight) } else { fill };
     ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
-    if selected {
-        // Like a focused item in Discord: a thin blurple outline.
-        ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(2.0, BLURPLE), egui::StrokeKind::Inside);
+    if selected || highlight > 0.0 {
+        // Like a focused item in Discord: a thin blurple outline; thicker
+        // while highlighted.
+        let width = 2.0 + 2.0 * highlight;
+        let color = if selected { BLURPLE } else { BLURPLE.gamma_multiply(highlight) };
+        ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(width, color), egui::StrokeKind::Inside);
     }
     let inner = rect.shrink(12.0);
     let mut action = None;
@@ -1365,6 +1426,45 @@ mod tests {
         assert_eq!(when(at, day + 400), "Nov 9 2026, 21:31");
         assert_eq!(clock(29.6), "0:30");
         assert_eq!(clock(125.0), "2:05");
+    }
+
+    #[test]
+    fn focusing_a_clip_makes_it_visible_then_highlights_it() {
+        let clip = |name: &str| ClipFile {
+            path: PathBuf::from(format!("C:\\clips\\{name}.wav")),
+            size: 1,
+            modified: SystemTime::UNIX_EPOCH,
+            saved: None,
+            name: Some(name.into()),
+        };
+        let all = vec![clip("old"), clip("new")];
+        let today = days_from_civil(2026, 11, 14);
+
+        // Hidden by the search and the Uploaded filter: both are undone first.
+        let mut page = ClipsPage { search: "old".into(), filter: Filter::Uploaded, ..Default::default() };
+        page.focus(all[1].path.clone());
+        page.resolve_focus(&all, &all[..1], today);
+        assert_eq!((page.search.as_str(), page.filter), ("", Filter::NotUploaded));
+        assert!(page.highlight.is_none(), "waits until it's shown");
+        // Next frame it's shown: selected, scrolled to and highlighted.
+        page.resolve_focus(&all, &all, today);
+        assert_eq!(page.selected.as_ref(), Some(&all[1].path));
+        assert!(page.scroll_to_selected);
+        assert_eq!(page.highlight.as_ref().map(|(p, _)| p), Some(&all[1].path));
+        assert!(page.focus.is_none());
+
+        // A matching search is kept.
+        let mut page = ClipsPage { search: "ne".into(), ..Default::default() };
+        page.focus(all[1].path.clone());
+        page.resolve_focus(&all, &all[1..], today);
+        assert_eq!(page.search, "ne");
+        assert!(page.highlight.is_some());
+
+        // Gone by now: dropped quietly.
+        let mut page = ClipsPage::default();
+        page.focus(PathBuf::from("C:\\clips\\deleted.wav"));
+        page.resolve_focus(&all, &all, today);
+        assert!(page.focus.is_none() && page.highlight.is_none() && page.selected.is_none());
     }
 
     #[test]

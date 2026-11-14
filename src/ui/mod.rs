@@ -24,13 +24,13 @@ mod widgets;
 
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use eframe::egui::{self, Color32, Frame, Margin, TextureHandle, Ui, ViewportCommand};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, IsIconic, SetForegroundWindow, ShowWindow, ASFW_ANY, SW_HIDE,
+    AllowSetForegroundWindow, GetForegroundWindow, IsIconic, SetForegroundWindow, ShowWindow, ASFW_ANY, SW_HIDE,
     SW_RESTORE, SW_SHOW,
 };
 
@@ -118,7 +118,15 @@ struct Shared {
     started: AtomicBool,
     /// Page to switch to the next time the window draws.
     requested_page: Mutex<Option<Page>>,
+    /// A clip for the Clips page to scroll to and highlight (#50).
+    focus_clip: Mutex<Option<PathBuf>>,
+    /// Frames left in which to bring the window to the front (see `raise`).
+    raise_frames: AtomicU32,
 }
+
+/// Frames to keep trying to bring the window to the front: a new window
+/// only becomes visible after its first frame or two.
+const RAISE_FRAMES: u32 = 10;
 
 fn shared() -> &'static Shared {
     static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -129,6 +137,8 @@ fn shared() -> &'static Shared {
         hwnd: AtomicIsize::new(0),
         started: AtomicBool::new(false),
         requested_page: Mutex::new(None),
+        focus_clip: Mutex::new(None),
+        raise_frames: AtomicU32::new(0),
     })
 }
 
@@ -164,6 +174,13 @@ pub fn open_page(snapshot: Snapshot, page: Page) {
     open(snapshot);
 }
 
+/// Tray thread: shows the window on the Clips page, scrolled to `clip` and
+/// highlighting it (#50: clicking the "Clip saved" notification).
+pub fn open_clip(snapshot: Snapshot, clip: PathBuf) {
+    *shared().focus_clip.lock().unwrap() = Some(clip);
+    open_page(snapshot, Page::Clips);
+}
+
 /// Tray thread: shows the window, creating it the first time. Closing the
 /// window only hides it (winit can't create a second event loop).
 pub fn open(snapshot: Snapshot) {
@@ -173,10 +190,17 @@ pub fn open(snapshot: Snapshot) {
         // window thread.
         let _ = AllowSetForegroundWindow(ASFW_ANY);
     }
+    // Clicking a notification (#50) doesn't give us the right to take the
+    // foreground like a tray click does, so the window also asks winit to
+    // focus it, which works around that.
+    shared().raise_frames.store(RAISE_FRAMES, Ordering::SeqCst);
     if let Some(hwnd) = window_hwnd() {
         unsafe {
             let _ = ShowWindow(hwnd, if IsIconic(hwnd).as_bool() { SW_RESTORE } else { SW_SHOW });
             let _ = SetForegroundWindow(hwnd);
+        }
+        if let Some(ctx) = shared().ctx.lock().unwrap().as_ref() {
+            ctx.request_repaint();
         }
         return;
     }
@@ -195,6 +219,23 @@ pub fn open(snapshot: Snapshot) {
         log!("couldn't start window thread: {e}");
         shared().started.store(false, Ordering::SeqCst);
     }
+}
+
+/// Window thread, each frame: while `open` asked for it, bring the window to
+/// the front, until it is or the frames run out.
+fn raise(ctx: &egui::Context) {
+    let left = shared().raise_frames.load(Ordering::SeqCst);
+    if left == 0 {
+        return;
+    }
+    let in_front = window_hwnd().is_some_and(|h| unsafe { GetForegroundWindow() } == h);
+    if in_front {
+        shared().raise_frames.store(0, Ordering::SeqCst);
+        return;
+    }
+    shared().raise_frames.store(left - 1, Ordering::SeqCst);
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    ctx.request_repaint();
 }
 
 fn run_window() -> eframe::Result {
@@ -334,6 +375,10 @@ impl eframe::App for ClipWindow {
         if let Some(page) = shared().requested_page.lock().unwrap().take() {
             self.page = page;
         }
+        if let Some(clip) = shared().focus_clip.lock().unwrap().take() {
+            self.clips.focus(clip);
+        }
+        raise(&ctx);
         let snap = shared().snapshot.lock().unwrap().clone();
         self.theme.update(&ctx, snap.cfg.theme);
 
