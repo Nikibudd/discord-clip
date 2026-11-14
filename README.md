@@ -126,6 +126,28 @@ Local Storage holds your Discord login token: it is never read, and nothing
 read is logged or copied anywhere. Only the theme is kept, in
 `discord-theme.txt` (below).
 
+## Who talked
+
+With `speakers = true` (the default), each saved clip also records **who
+talked when**: your own speech from the mic track, and everyone else's from
+Discord's speaking status, matched to the speech in the audio. People are
+stored by their Discord user id, so a new name doesn't make a new person.
+(Nothing in the window shows it yet.)
+
+**How, without logging in:**
+- **Which voice channel you're in:** only the voice connection lines of
+  Discord's own log, `%APPDATA%\discord\logs\renderer_js.log`. Joining,
+  switching and leaving are written as they happen. The fallback is one more
+  exact Local Storage key, `SelectedChannelStore`.
+- **Who's speaking:** Discord's local RPC pipe, the same one Rich Presence
+  uses, as Discord Clip's own Discord application (no secret, no OAuth). It
+  gives speaking start/stop events for that channel and the names and avatars
+  of the people in it.
+
+Your login token is never read, nothing is sent anywhere, and nothing about
+other people is logged. Discord doesn't document this way of reading the
+speaking status: if an update breaks it, clips just save without names.
+
 ## Updates
 
 With `check_updates = true` (the default) the app checks GitHub 20 seconds
@@ -171,6 +193,7 @@ out_dir = C:\Users\you\Music\Discord Clips   # full path; %USERPROFILE% etc. all
 clipboard = true
 notifications = true
 check_updates = true         # look for new versions (never installs without asking)
+speakers = true              # record who talks when in each clip (see Who talked)
 theme = discord              # discord (follow Discord), dark or light
 ```
 
@@ -187,6 +210,8 @@ Each is a small text file, rewritten as things change:
 | `clip-volumes.txt` | Track volumes set in the Edit dialog, per clip |
 | `clip-uploaded.txt` | Clips marked as uploaded |
 | `discord-theme.txt` | The last Discord theme read, used until the next read works |
+| `clip-speakers.json` | Who talked when in each clip, by Discord user id |
+| `discord-users.json` | Names and avatar ids of the people in your clips, by user id |
 
 ## Releases
 
@@ -284,5 +309,7 @@ it from the tray before copying a new build over it).
 | `src/uploaded.rs` | Uploaded marks (`clip-uploaded.txt`) |
 | `src/discord_theme.rs` | Reads Discord's theme from `settings.json` and exact Local Storage keys (never anything else), remembers it in `discord-theme.txt` |
 | `src/leveldb.rs` | A minimal read-only LevelDB reader for Discord's Local Storage |
+| `src/discord_voice.rs` | Who's talking in your call: the voice channel from Discord's log (or `SelectedChannelStore`), speaking events and names over the local RPC pipe |
+| `src/speakers.rs` | Who talked when in each clip: speech detection on the tracks, matching it to the speaking events, `clip-speakers.json` + `discord-users.json` |
 | `src/player.rs` | Clip playback with pause and seeking (`waveOut`) |
 | `src/log.rs` | Log file |

@@ -710,6 +710,10 @@ impl ClipsPage {
         if let Err(e) = uploaded::rename(from, to) {
             crate::log!("moving the uploaded mark of {} failed: {e:#}", from.display());
         }
+        // Who talked in it follows too (#66).
+        if let Err(e) = crate::speakers::rename(from, to) {
+            crate::log!("moving the speakers of {} failed: {e:#}", from.display());
+        }
         self.uploaded = uploaded::load();
         crate::tray::post_library_changed(); // renamed or replaced (#48)
     }
@@ -798,13 +802,22 @@ impl ClipsPage {
                 }
                 let trimmed = start > 0.0 || end < 1.0;
                 let written = if trimmed { library::replace_with_trimmed(&path, start, end) } else { Ok(()) };
+                if trimmed && written.is_ok() {
+                    if let Err(e) = crate::speakers::trim(&path, &path, start, end) {
+                        crate::log!("trimming the speakers of {} failed: {e:#}", path.display());
+                    }
+                }
                 written.and_then(|()| volumes::set(&path, v)).map(|()| {
                     Some(if trimmed { "Saved. The original is in the Recycle Bin." } else { "Saved." }.to_string())
                 })
             }
             // The new clip gets these volumes; the original keeps its own.
-            Choice::SaveNew { start, end, volumes: v } => library::save_edited_copy(&path, start, end)
-                .and_then(|p| volumes::set(&p, v).map(|()| Some(format!("Saved as {}.", file_name(&p))))),
+            Choice::SaveNew { start, end, volumes: v } => library::save_edited_copy(&path, start, end).and_then(|p| {
+                if let Err(e) = crate::speakers::trim(&path, &p, start, end) {
+                    crate::log!("copying the speakers of {} failed: {e:#}", path.display());
+                }
+                volumes::set(&p, v).map(|()| Some(format!("Saved as {}.", file_name(&p))))
+            }),
         };
         match result {
             Ok(msg) => {
