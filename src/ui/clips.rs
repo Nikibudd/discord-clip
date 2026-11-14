@@ -641,7 +641,8 @@ fn empty_state(ui: &mut Ui, snap: &Snapshot) {
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(24))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+            // A box of text: keep the reading width of the other pages.
+            ui.set_width(ui.available_width().min(super::READING_WIDTH - 48.0));
             text(ui, "No clips yet", 16.0, Weight::Semibold, pal().header_primary);
             ui.add_space(6.0);
             text(
