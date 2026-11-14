@@ -57,6 +57,8 @@ struct State {
     users: HashMap<String, User>,
     /// You, from the pipe's READY message.
     own_id: Option<String>,
+    /// Users the window wants fresh names for (#67), asked once per connection.
+    wanted: Vec<String>,
 }
 
 fn state() -> &'static Mutex<State> {
@@ -86,6 +88,17 @@ pub fn events_since(from: Instant) -> (Vec<Event>, Option<String>) {
 /// The users Discord has told us about this session.
 pub fn users() -> HashMap<String, User> {
     state().lock().unwrap().users.clone()
+}
+
+/// Your own Discord user id, once connected.
+pub fn own_id() -> Option<String> {
+    state().lock().unwrap().own_id.clone()
+}
+
+/// Asks Discord for the current names of `ids` (e.g. people in a clip that's
+/// being shown), so a rename shows up; `users()` has them once answered.
+pub fn refresh_users(ids: impl IntoIterator<Item = String>) {
+    state().lock().unwrap().wanted.extend(ids);
 }
 
 /// Starts listening on a background thread, keeping `keep` worth of events
@@ -129,6 +142,14 @@ fn run(running: &AtomicBool, keep: Duration) {
                         r.speaking("SUBSCRIBE", new)?;
                     }
                     subscribed = current.clone();
+                }
+                if r.ready {
+                    let wanted = std::mem::take(&mut state().lock().unwrap().wanted);
+                    for id in wanted {
+                        if r.asked.insert(id.clone()) {
+                            r.send(json!({ "cmd": "GET_USER", "args": { "id": id }, "nonce": format!("user-{id}") }))?;
+                        }
+                    }
                 }
                 Ok(())
             })();

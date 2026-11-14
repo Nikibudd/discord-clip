@@ -132,7 +132,13 @@ With `speakers = true` (the default), each saved clip also records **who
 talked when**: your own speech from the mic track, and everyone else's from
 Discord's speaking status, matched to the speech in the audio. People are
 stored by their Discord user id, so a new name doesn't make a new person.
-(Nothing in the window shows it yet.)
+Turn it on or off in **Settings → Recording → Show who's talking**.
+
+The **Edit dialog** shows it under the waveform: a row per person with their
+profile picture and current name, and a dot where they start and stop
+talking, joined by a line, on the waveform's time axis (your own row is
+**You**; speech without a name is **Other**). Hover a line for the times,
+click it to play from there.
 
 **How, without logging in:**
 - **Which voice channel you're in:** only the voice connection lines of
@@ -143,6 +149,10 @@ stored by their Discord user id, so a new name doesn't make a new person.
   uses, as Discord Clip's own Discord application (no secret, no OAuth). It
   gives speaking start/stop events for that channel and the names and avatars
   of the people in it.
+
+- **Profile pictures:** downloaded from Discord's public image server
+  (`cdn.discordapp.com`), the same pictures Discord shows you, and cached in
+  `%LOCALAPPDATA%\discord-clip\avatars`.
 
 Your login token is never read, nothing is sent anywhere, and nothing about
 other people is logged. Discord doesn't document this way of reading the
@@ -293,7 +303,7 @@ it from the tray before copying a new build over it).
 | --- | --- |
 | `src/main.rs` | Startup, single-instance check, CLI overrides, Discord supervisor thread |
 | `src/tray/` | The tray app (main thread): `mod.rs` app state + message loop, `notify_icon.rs` tray icon/tooltip (incl. the clips line)/notifications, `menu.rs` right-click menu, `global_hotkey.rs` save-clip hotkey, `actions.rs` saving clips, opening folders, opening a saved clip in the window, `window.rs` snapshot/commands for the window, folder picker, update hand-off |
-| `src/ui/` | The window (egui, own thread): `mod.rs` command/snapshot API + window lifecycle, `theme.rs` Discord colours/fonts, the palette that follows Discord and the gradient backdrop, `follow.rs` watching and reading Discord's theme, `widgets.rs` buttons/toggles/sliders/dropdowns, `sidebar.rs` page list + status card, `keybind.rs` hotkey recorder, `edit.rs` Edit dialog, `confirm.rs` confirm dialog, one file per page (`clips.rs`, `settings.rs`, `updates.rs`) |
+| `src/ui/` | The window (egui, own thread): `mod.rs` command/snapshot API + window lifecycle, `theme.rs` Discord colours/fonts, the palette that follows Discord and the gradient backdrop, `follow.rs` watching and reading Discord's theme, `widgets.rs` buttons/toggles/sliders/dropdowns, `sidebar.rs` page list + status card, `keybind.rs` hotkey recorder, `edit.rs` Edit dialog (incl. the people who talk), `avatars.rs` Discord profile pictures (download, disk cache, PNG decode), `confirm.rs` confirm dialog, one file per page (`clips.rs`, `settings.rs`, `updates.rs`) |
 | `src/icon.rs` | The app icon, drawn in code: at runtime for the tray and window, and at build time for the exe |
 | `build.rs` | Embeds the icon and version info in the exe (`winresource`), so the taskbar, Start menu and Explorer show it |
 | `src/autostart.rs` | "Start with Windows": the `Discord Clip` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (same as the installer), incl. Task Manager's Startup apps switch |
