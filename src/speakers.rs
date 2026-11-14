@@ -207,6 +207,38 @@ fn assign(discord_speech: &[(f32, f32)], mic_speech: &[(f32, f32)], spans: &[(St
     out
 }
 
+/// Gaps shorter than this between one person's segments are joined: a new
+/// sentence after a short pause is still the same stretch of talking (#72).
+pub const MERGE_GAP: f32 = 0.8;
+/// Segments shorter than this (after joining) are left out: breaths,
+/// clicks, flickers of Discord's speaking indicator (#72).
+pub const MIN_SEGMENT: f32 = 0.25;
+
+/// `segments` cleaned up for showing (#72): per person, join pieces closer
+/// than `merge_gap`, then drop what's shorter than `min_len`. Different
+/// people are never joined, so overlaps between them stay. The stored data
+/// keeps every detail; this is only applied when it's used.
+pub fn smoothed(segments: &[Segment], merge_gap: f32, min_len: f32) -> Vec<Segment> {
+    let mut by_who: BTreeMap<Option<&str>, Vec<&Segment>> = BTreeMap::new();
+    for s in segments {
+        by_who.entry(s.who.as_deref()).or_default().push(s);
+    }
+    let mut out = Vec::new();
+    for (_, mut list) in by_who {
+        list.sort_by(|a, b| a.start.total_cmp(&b.start));
+        let mut joined: Vec<Segment> = Vec::new();
+        for s in list {
+            match joined.last_mut() {
+                Some(last) if s.start - last.end < merge_gap => last.end = last.end.max(s.end),
+                _ => joined.push(s.clone()),
+            }
+        }
+        out.extend(joined.into_iter().filter(|s| s.end - s.start >= min_len));
+    }
+    out.sort_by(|a, b| a.start.total_cmp(&b.start));
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Finding speech in audio
 // ---------------------------------------------------------------------------
@@ -409,6 +441,27 @@ mod tests {
         assert!(close(other[0].start, 6.0));
         let you = find(Some(YOU));
         assert!(close(you[0].start, 8.0) && close(you[0].end, 9.0));
+    }
+
+    #[test]
+    fn smoothing_joins_close_pieces_and_drops_blips() {
+        let seg = |start: f32, end: f32, who: Option<&str>| Segment { start, end, who: who.map(str::to_string) };
+        let segs = [
+            // bob: three sentences with short pauses, then a blip far away.
+            seg(1.0, 2.0, Some("bob")),
+            seg(2.5, 3.0, Some("bob")),
+            seg(3.4, 4.0, Some("bob")),
+            seg(9.0, 9.1, Some("bob")),
+            // alice overlaps bob: never joined with him.
+            seg(2.2, 2.9, Some("alice")),
+            // Short pieces close together become one line instead of vanishing.
+            seg(6.0, 6.1, None),
+            seg(6.3, 6.4, None),
+            seg(6.6, 6.7, None),
+        ];
+        let out = smoothed(&segs, MERGE_GAP, MIN_SEGMENT);
+        let got: Vec<(f32, f32, Option<&str>)> = out.iter().map(|s| (s.start, s.end, s.who.as_deref())).collect();
+        assert_eq!(got, [(1.0, 4.0, Some("bob")), (2.2, 2.9, Some("alice")), (6.0, 6.7, None)]);
     }
 
     #[test]

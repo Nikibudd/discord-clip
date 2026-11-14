@@ -586,7 +586,13 @@ impl EditDialog {
 /// Who talked in the clip (#66), if anything was recorded; asks Discord for
 /// the current names of the people in it (#67), so renames show.
 fn load_speakers(clip: &ClipFile) -> Option<ClipSpeakers> {
-    let data = crate::speakers::lookup(&crate::speakers::load(), &clip.path).cloned().filter(|d| !d.segments.is_empty())?;
+    use crate::speakers::{smoothed, MERGE_GAP, MIN_SEGMENT};
+    let mut data = crate::speakers::lookup(&crate::speakers::load(), &clip.path).cloned()?;
+    // Stretches of talking, not every flicker (#72).
+    data.segments = smoothed(&data.segments, MERGE_GAP, MIN_SEGMENT);
+    if data.segments.is_empty() {
+        return None;
+    }
     crate::discord_voice::refresh_users(data.segments.iter().filter_map(|s| s.who.clone()).filter(|w| w != YOU));
     Some(data)
 }
