@@ -322,7 +322,8 @@ pub struct Backdrop {
 
 impl Backdrop {
     /// Overlay opacities from Discord's CSS (`--custom-background-gradient-*`):
-    /// content = "chat", sidebar = "lowest", status card = "highest" (the
+    /// content = "chat", sidebar = "high" (like Discord's channel list,
+    /// `.guildSidebar`), status card = "highest" (the
     /// lightest overlay, so it reads as brighter glass; #46, #55),
     /// title bar = "app-frame".
     pub fn from_discord(theme: &DiscordTheme) -> Option<Backdrop> {
@@ -343,14 +344,14 @@ impl Backdrop {
         let (content, sidebar, panel, frame) = if tint.custom {
             let m = (30.0 + 0.7 * (100.0 - tint.mix * 100.0)) / 100.0;
             if dark {
-                (0.48 + m * 0.32, 0.54 + m * 0.36, 0.39 + m * 0.26, 0.42 + m * 0.28)
+                (0.48 + m * 0.32, 0.45 + m * 0.3, 0.39 + m * 0.26, 0.42 + m * 0.28)
             } else {
-                (0.85 * (0.6 + m * 0.4), 0.51 + m * 0.34, 0.95 * (0.8 + m * 0.2), 0.325 + m * 0.325)
+                (0.85 * (0.6 + m * 0.4), 0.42 + m * 0.28, 0.95 * (0.8 + m * 0.2), 0.325 + m * 0.325)
             }
         } else if dark {
-            (0.8, 0.9, 0.65, 0.7)
+            (0.8, 0.75, 0.65, 0.7)
         } else {
-            (0.85, 0.85, 0.95, 0.65)
+            (0.85, 0.7, 0.95, 0.65)
         };
         let overlay = if dark { Color32::BLACK } else { Color32::WHITE };
         Some(Backdrop { stops, angle: tint.angle, overlay, content, sidebar, panel, frame })
@@ -672,7 +673,7 @@ mod tests {
 
     #[test]
     fn status_card_is_brighter_than_the_sidebar() {
-        // Discord's "highest" level against "lowest" (#46, #55), for presets
+        // Discord's "highest" level against "high" (#46, #55), for presets
         // and custom themes, dark and light: less black overlay on dark
         // themes, more white on light ones.
         let window = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0));
