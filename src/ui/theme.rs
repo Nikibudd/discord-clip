@@ -312,15 +312,18 @@ pub struct Backdrop {
     /// CSS angle in degrees: 0 = towards the top, 90 = towards the right.
     angle: f32,
     overlay: Color32,
-    /// Overlay opacity of the content area, the sidebar and the title bar.
+    /// Overlay opacity of the content area, the sidebar, the sidebar's status
+    /// panel and the title bar.
     pub content: f32,
     pub sidebar: f32,
+    pub panel: f32,
     frame: f32,
 }
 
 impl Backdrop {
     /// Overlay opacities from Discord's CSS (`--custom-background-gradient-*`):
-    /// content = "chat", sidebar = "lowest", title bar = "app-frame".
+    /// content = "chat", sidebar = "lowest", status panel = "low" (#46),
+    /// title bar = "app-frame".
     pub fn from_discord(theme: &DiscordTheme) -> Option<Backdrop> {
         let tint = theme.tint.as_ref()?;
         let dark = theme.base != Base::Light;
@@ -336,20 +339,20 @@ impl Backdrop {
         if stops.is_empty() {
             return None;
         }
-        let (content, sidebar, frame) = if tint.custom {
+        let (content, sidebar, panel, frame) = if tint.custom {
             let m = (30.0 + 0.7 * (100.0 - tint.mix * 100.0)) / 100.0;
             if dark {
-                (0.48 + m * 0.32, 0.54 + m * 0.36, 0.42 + m * 0.28)
+                (0.48 + m * 0.32, 0.54 + m * 0.36, 0.48 + m * 0.32, 0.42 + m * 0.28)
             } else {
-                (0.85 * (0.6 + m * 0.4), 0.51 + m * 0.34, 0.325 + m * 0.325)
+                (0.85 * (0.6 + m * 0.4), 0.51 + m * 0.34, 0.45 + m * 0.3, 0.325 + m * 0.325)
             }
         } else if dark {
-            (0.8, 0.9, 0.7)
+            (0.8, 0.9, 0.8, 0.7)
         } else {
-            (0.85, 0.85, 0.65)
+            (0.85, 0.85, 0.75, 0.65)
         };
         let overlay = if dark { Color32::BLACK } else { Color32::WHITE };
-        Some(Backdrop { stops, angle: tint.angle, overlay, content, sidebar, frame })
+        Some(Backdrop { stops, angle: tint.angle, overlay, content, sidebar, panel, frame })
     }
 
     /// The gradient's colour at `t` (0–1 along the gradient line).
@@ -371,7 +374,7 @@ impl Backdrop {
 
     /// Like CSS `linear-gradient(<angle>deg, …)` over `window`: the colour
     /// at `p`, under the overlay at `opacity`.
-    fn at(&self, window: Rect, p: Pos2, opacity: f32) -> Color32 {
+    pub fn at(&self, window: Rect, p: Pos2, opacity: f32) -> Color32 {
         let a = self.angle.to_radians();
         let dir = vec2(a.sin(), -a.cos());
         let len = (window.width() * a.sin()).abs() + (window.height() * a.cos()).abs();
@@ -635,5 +638,26 @@ mod tests {
         assert_eq!(side.at(window, pos2(0.0, 0.0), 0.0), rgb(255, 0, 0));
         // The overlay darkens it.
         assert_eq!(b.at(window, pos2(10.0, 0.0), b.content), rgb(51, 0, 0));
+    }
+
+    #[test]
+    fn status_panel_overlay_is_lighter_than_the_sidebar() {
+        // Discord's "low" level against "lowest" (#46), for presets and
+        // custom themes, dark and light.
+        for (base, custom) in [(Base::Dark, false), (Base::Light, false), (Base::Dark, true), (Base::Light, true)] {
+            let theme = DiscordTheme {
+                base,
+                tint: Some(Tint { stops: vec![([255, 0, 0], 0.0)], angle: 180.0, custom, mix: 0.5 }),
+                saturation: 1.0,
+            };
+            let b = Backdrop::from_discord(&theme).unwrap();
+            assert!(b.panel < b.sidebar, "{base:?} custom={custom}: panel {} sidebar {}", b.panel, b.sidebar);
+        }
+        let dark = DiscordTheme {
+            base: Base::Dark,
+            tint: Some(Tint { stops: vec![([255, 0, 0], 0.0)], angle: 180.0, custom: false, mix: 0.5 }),
+            saturation: 1.0,
+        };
+        assert_eq!(Backdrop::from_discord(&dark).unwrap().panel, 0.8);
     }
 }

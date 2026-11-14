@@ -13,8 +13,16 @@ pub fn show(ui: &mut Ui, page: &mut Page, snap: &Snapshot, icons: &Icons) {
         .exact_size(52.0)
         .resizable(false)
         .show_separator_line(false)
-        .frame(Frame::new().fill(pal().bg_secondary_alt).inner_margin(Margin::symmetric(8, 0)))
-        .show(ui, |ui| status_panel(ui, snap, icons));
+        .frame(Frame::new().fill(panel_fill()).inner_margin(Margin::symmetric(8, 0)))
+        .show(ui, |ui| {
+            // A Nitro gradient shows through, a little lighter than the
+            // sidebar, like Discord's user panel (#46).
+            if let Some(b) = backdrop() {
+                let rect = ui.max_rect().expand2(vec2(8.0, 0.0));
+                b.paint(&ui.ctx().layer_painter(ui.layer_id()), ui.ctx().content_rect(), rect, b.panel);
+            }
+            status_panel(ui, snap, icons)
+        });
 
     Frame::new().inner_margin(Margin { left: 10, right: 10, top: 24, bottom: 8 }).show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -31,6 +39,11 @@ pub fn show(ui: &mut Ui, page: &mut Page, snap: &Snapshot, icons: &Icons) {
             ui.add_space(2.0);
         }
     });
+}
+
+/// The status panel's own fill: none when a gradient is painted behind it.
+fn panel_fill() -> Color32 {
+    if backdrop().is_some() { Color32::TRANSPARENT } else { pal().bg_secondary_alt }
 }
 
 /// `badge`: Discord's red notification pill on the right.
@@ -76,7 +89,12 @@ fn status_panel(ui: &mut Ui, snap: &Snapshot, icons: &Icons) {
     let tex = if snap.discord_active { &icons.active } else { &icons.idle };
     painter.image(tex.id(), avatar, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     let dot_c = avatar.right_bottom() - vec2(4.0, 4.0);
-    painter.circle_filled(dot_c, 7.0, pal().bg_secondary_alt);
+    // The ring around the dot matches the panel behind it.
+    let ring = match backdrop() {
+        Some(b) => b.at(ui.ctx().content_rect(), dot_c, b.panel),
+        None => pal().bg_secondary_alt,
+    };
+    painter.circle_filled(dot_c, 7.0, ring);
     painter.circle_filled(dot_c, 5.0, dot);
     let x = avatar.right() + 8.0;
     painter.text(pos2(x, rect.center().y - 1.0), Align2::LEFT_BOTTOM, "Discord Clip", font(14.0, Weight::Semibold), pal().header_primary);
