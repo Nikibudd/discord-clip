@@ -63,7 +63,11 @@ impl SoundboardsPage {
         servers(ui, &loaded.lock().unwrap());
 
         divider(ui);
-        self.add_servers(ui, service);
+        // The form keeps the reading width; the cards above use the window.
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(super::READING_WIDTH));
+            self.add_servers(ui, service);
+        });
     }
 
     /// Paste invite links -> an "Add bot" button per server without the bot.
@@ -245,13 +249,13 @@ fn sounds(ui: &mut Ui, b: &Board) {
                 _ => s.name.clone(),
             };
             let color = if s.available { pal().text_normal } else { pal().text_muted };
-            let r = Frame::new()
-                .fill(pal().bg_tertiary)
-                .corner_radius(CornerRadius::same(12))
-                .inner_margin(Margin::symmetric(10, 4))
-                .show(ui, |ui| text(ui, label, 14.0, Weight::Regular, color));
+            // Each label stays on one line; a full row continues on the next.
+            let galley = ui.painter().layout_no_wrap(label, font(14.0, Weight::Regular), color);
+            let (rect, resp) = ui.allocate_exact_size(galley.size() + vec2(20.0, 8.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, CornerRadius::same(12), pal().bg_tertiary);
+            ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
             if !s.available {
-                r.response.on_hover_text("Turned off: the server lost the boost for this slot");
+                resp.on_hover_text("Turned off: the server lost the boost for this slot");
             }
         }
     });
