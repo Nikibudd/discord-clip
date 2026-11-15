@@ -1,5 +1,7 @@
 //! The Settings page.
 
+use std::sync::{Arc, Mutex};
+
 use eframe::egui::{self, pos2, vec2, Align, CornerRadius, Frame, Layout, Margin, Sense, Ui};
 
 use super::follow::Follower;
@@ -9,12 +11,27 @@ use super::widgets::*;
 use super::{send, set, Command, Snapshot};
 use crate::config::Config;
 
+/// A background call's answer, once it's there.
+pub(super) type Pending<T> = Arc<Mutex<Option<Result<T, String>>>>;
+
 #[derive(Default)]
 pub struct SettingsPage {
     pub keybind: KeybindRecorder,
     /// Slider values while dragging (committed on release).
     seconds_drag: Option<f32>,
     gain_drag: Option<f32>,
+    soundboard: SoundboardForm,
+}
+
+/// Settings → Soundboard (#76): the service address and upload key. The
+/// servers themselves are on the Soundboards page.
+#[derive(Default)]
+struct SoundboardForm {
+    /// The fields; `None` until first shown (then filled from the settings).
+    url: Option<String>,
+    key: String,
+    /// The last "Save" check: the bot's name, or what went wrong.
+    check: Option<Pending<String>>,
 }
 
 impl SettingsPage {
@@ -140,6 +157,11 @@ impl SettingsPage {
         if row(ui, "Show who's talking", speakers_desc, |ui| toggle(ui, cfg.speakers)).clicked() {
             set(Command::SetSpeakers(!cfg.speakers));
         }
+
+        divider(ui);
+
+        section_label(ui, "Soundboard");
+        self.soundboard.show(ui, cfg);
 
         divider(ui);
 
@@ -387,5 +409,113 @@ fn theme_picker(ui: &mut Ui, cfg: &Config, follower: &Follower) {
         if Some(i) != selected {
             set(Command::SetTheme(ThemeMode::ALL[i]));
         }
+    }
+}
+
+/// Where the setup guide for a group's soundboard service lives.
+const SOUNDBOARD_GUIDE: &str = "https://github.com/Nikibudd/discord-clip/blob/main/worker/README.md";
+
+/// Discord's link colour.
+const LINK: egui::Color32 = rgb(0x00, 0xA8, 0xFC);
+
+/// Runs `f` on a worker thread; its answer lands in the returned slot.
+pub(super) fn spawn_call<T: Send + 'static>(ctx: &egui::Context, f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Pending<T> {
+    let slot: Pending<T> = Arc::new(Mutex::new(None));
+    let (out, ctx) = (slot.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let r = f().map_err(|e| format!("{e:#}"));
+        *out.lock().unwrap() = Some(r);
+        ctx.request_repaint();
+    });
+    slot
+}
+
+/// An answer that's already there (e.g. a mistake found before calling).
+pub(super) fn answered<T>(r: Result<T, String>) -> Pending<T> {
+    Arc::new(Mutex::new(Some(r)))
+}
+
+impl SoundboardForm {
+    fn show(&mut self, ui: &mut Ui, cfg: &Config) {
+        text(
+            ui,
+            "Upload clips straight to your group's soundboard servers. Your group hosts a small soundboard \
+             service for this (free on Cloudflare); whoever set it up gives you its address and key.",
+            14.0,
+            Weight::Regular,
+            pal().header_secondary,
+        );
+        ui.add_space(4.0);
+        if ui.link(egui::RichText::new("How to set one up").color(LINK)).clicked() {
+            send(Command::OpenUrl(SOUNDBOARD_GUIDE.to_string()));
+        }
+        ui.add_space(12.0);
+
+        if self.url.is_none() {
+            // First time shown: fill in what's saved.
+            self.url = Some(cfg.soundboard_url.clone());
+            self.key = crate::secret::upload_key().unwrap_or_default();
+        }
+        let w = ui.available_width();
+        text(ui, "Service address", 16.0, Weight::Semibold, pal().header_primary);
+        ui.add_space(6.0);
+        text_field(ui, self.url.as_mut().unwrap(), "https://name.you.workers.dev", false, w);
+        ui.add_space(12.0);
+        text(ui, "Upload key", 16.0, Weight::Semibold, pal().header_primary);
+        ui.add_space(6.0);
+        text_field(ui, &mut self.key, "Only if your group uses one", true, w);
+        ui.add_space(12.0);
+
+        ui.horizontal(|ui| {
+            if button(ui, "Save and test", ButtonKind::Primary).clicked() {
+                self.save(ui.ctx(), cfg);
+            }
+            if !cfg.soundboard_url.is_empty() && button(ui, "Turn off", ButtonKind::Secondary).clicked() {
+                set(Command::SetSoundboardUrl(String::new()));
+                if let Err(e) = crate::secret::set_upload_key("") {
+                    crate::log!("removing the soundboard key failed: {e:#}");
+                }
+                self.url = Some(String::new());
+                self.key.clear();
+                self.check = None;
+            }
+        });
+        if let Some(check) = &self.check {
+            ui.add_space(8.0);
+            match &*check.lock().unwrap() {
+                None => status_line(ui, None, "Checking…", pal().text_muted),
+                Some(Ok(bot)) => status_line(ui, Some(GREEN_BTN), &format!("Connected to the bot {bot}."), pal().text_normal),
+                Some(Err(e)) => status_line(ui, Some(pal().red), e, pal().red),
+            }
+        }
+
+        if !cfg.soundboard_url.is_empty() {
+            ui.add_space(8.0);
+            text(ui, "Your servers, their free slots and adding the bot to more are on the Soundboards page.", 14.0, Weight::Regular, pal().text_muted);
+        }
+    }
+
+    /// Saves the address and key, then checks the service answers.
+    fn save(&mut self, ctx: &egui::Context, cfg: &Config) {
+        let url = match crate::config::validate_soundboard_url(self.url.as_deref().unwrap_or("")) {
+            Ok(u) => u,
+            Err(e) => {
+                self.check = Some(answered(Err(format!("{e:#}"))));
+                return;
+            }
+        };
+        if url != cfg.soundboard_url {
+            set(Command::SetSoundboardUrl(url.clone()));
+        }
+        self.url = Some(url.clone());
+        let key = self.key.trim().to_string();
+        if let Err(e) = crate::secret::set_upload_key(&key) {
+            self.check = Some(answered(Err(format!("Couldn't save the key: {e:#}"))));
+            return;
+        }
+        self.check = match crate::soundboard::Service::new(&url, Some(key)) {
+            Some(service) => Some(spawn_call(ctx, move || service.check())),
+            None => None, // turned off
+        };
     }
 }

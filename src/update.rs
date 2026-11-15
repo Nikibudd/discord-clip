@@ -12,7 +12,6 @@
 //! Network work happens on short-lived worker threads; the tray thread is
 //! told about changes through `tray::post_status_changed` and reads [`status`].
 
-use std::ffi::c_void;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,8 +21,6 @@ use std::time::{Duration, SystemTime};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Networking::WinHttp::*;
 
 use crate::log;
 
@@ -234,7 +231,7 @@ fn run_check() {
 
 fn fetch_manifest() -> Result<Manifest> {
     let mut body = Vec::new();
-    http_get(MANIFEST_URL, |chunk| {
+    crate::http::get(MANIFEST_URL, |chunk| {
         body.extend_from_slice(chunk);
         if body.len() > 256 * 1024 {
             bail!("update manifest is too large");
@@ -298,7 +295,7 @@ fn download(manifest: &Manifest, asset: &Asset) -> Result<PathBuf> {
     let mut hasher = Sha256::new();
     let mut last_report = 0u64;
     set_state(State::Downloading { manifest: manifest.clone(), done, total });
-    let result = http_get(&asset.url, |chunk| {
+    let result = crate::http::get(&asset.url, |chunk| {
         file.write_all(chunk)?;
         hasher.update(chunk);
         done += chunk.len() as u64;
@@ -377,92 +374,6 @@ fn replace_exe(new: &Path) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// HTTPS via WinHTTP (uses the system's TLS, proxy settings and certificates)
-// ---------------------------------------------------------------------------
-
-struct Handle(*mut c_void);
-
-impl Handle {
-    fn new(h: *mut c_void, what: &str) -> Result<Self> {
-        if h.is_null() {
-            Err(windows::core::Error::from_win32()).with_context(|| what.to_string())
-        } else {
-            Ok(Handle(h))
-        }
-    }
-}
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = WinHttpCloseHandle(self.0);
-        }
-    }
-}
-
-/// GETs an https URL (following redirects), passing the body to `on_chunk`.
-pub(crate) fn http_get(url: &str, mut on_chunk: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
-    let rest = url.strip_prefix("https://").context("URLs must use https")?;
-    let (host, path) = match rest.split_once('/') {
-        Some((h, p)) => (h, format!("/{p}")),
-        None => (rest, "/".to_string()),
-    };
-    unsafe {
-        let agent = HSTRING::from(format!("discord-clip/{CURRENT}"));
-        let session = Handle::new(
-            WinHttpOpen(&agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0),
-            "starting WinHTTP",
-        )?;
-        WinHttpSetTimeouts(session.0, 15_000, 15_000, 30_000, 30_000)?;
-        let connect = Handle::new(
-            WinHttpConnect(session.0, &HSTRING::from(host), 443, 0),
-            "connecting",
-        )?;
-        let request = Handle::new(
-            WinHttpOpenRequest(
-                connect.0,
-                w!("GET"),
-                &HSTRING::from(path),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                std::ptr::null(),
-                WINHTTP_FLAG_SECURE,
-            ),
-            "creating request",
-        )?;
-        WinHttpSendRequest(request.0, None, None, 0, 0, 0).with_context(|| format!("connecting to {host}"))?;
-        WinHttpReceiveResponse(request.0, std::ptr::null_mut()).with_context(|| format!("waiting for {host}"))?;
-
-        let mut code: u32 = 0;
-        let mut len = std::mem::size_of::<u32>() as u32;
-        WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some(&mut code as *mut u32 as *mut c_void),
-            &mut len,
-            std::ptr::null_mut(),
-        )?;
-        match code {
-            200 => {}
-            404 => bail!("no release found on GitHub (HTTP 404)"),
-            _ => bail!("GitHub answered HTTP {code}"),
-        }
-
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let mut n: u32 = 0;
-            WinHttpReadData(request.0, buf.as_mut_ptr() as *mut c_void, buf.len() as u32, &mut n)
-                .context("downloading")?;
-            if n == 0 {
-                break;
-            }
-            on_chunk(&buf[..n as usize])?;
-        }
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

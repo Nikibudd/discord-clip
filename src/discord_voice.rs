@@ -95,6 +95,33 @@ pub fn own_id() -> Option<String> {
     state().lock().unwrap().own_id.clone()
 }
 
+/// Your own Discord user id, connecting to Discord briefly if the voice
+/// thread hasn't (e.g. "Show who's talking" is off). Blocks for up to 2 s;
+/// `None` when Discord isn't running.
+pub fn ask_own_id() -> Option<String> {
+    if let Some(id) = own_id() {
+        return Some(id);
+    }
+    let mut rpc = Rpc::connect().ok()?;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        match rpc.poll() {
+            Ok(Some(msg)) => {
+                if msg["evt"] == "READY" {
+                    let id = msg["data"]["user"]["id"].as_str().map(str::to_string);
+                    if let Some(id) = &id {
+                        state().lock().unwrap().own_id = Some(id.clone());
+                    }
+                    return id;
+                }
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 /// Asks Discord for the current names of `ids` (e.g. people in a clip that's
 /// being shown), so a rename shows up; `users()` has them once answered.
 pub fn refresh_users(ids: impl IntoIterator<Item = String>) {

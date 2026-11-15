@@ -88,11 +88,33 @@ to the Recycle Bin), **Save as new clip** keeps the original, **Cancel** (or
 Esc) throws the changes away. Volumes are stored next to the clip rather than
 in the file, so they can be changed again later.
 
+### Soundboards
+
+Upload clips straight to your group's Discord soundboard servers. Your group
+hosts a small soundboard service for this: a free Cloudflare Worker holding
+your group's own Discord bot (setup in [`worker/README.md`](worker/README.md)).
+Whoever set it up gives the others its address and, optionally, an upload
+key. Put them in **Settings → Soundboard** and press **Save and test**.
+
+The **Soundboards** page then lists the servers you share with the bot, with
+their free slots and the sounds already on them, and turns pasted invite
+links into **Add bot** links for servers that don't have it yet. On the Clips
+page, Discord-ready clips get an **Upload to soundboard** button: pick a
+server, a name, an emoji (from a searchable picker like Discord's) and the
+volume. The clip is marked as uploaded afterwards.
+
+The bot token never leaves the Worker. The app only sends the clip, the
+name, your Discord user id (read from Discord's local RPC pipe, so the
+service can show only servers you're in) and the key. The key is stored
+encrypted for your Windows user (`soundboard-key.bin`), never in `config.ini`.
+
 ### Settings
 
 - **Hotkey:** a recorder; combos already taken by another app are rejected.
 - **Recording:** clip length, format, microphone on/off, which mic (falls back
   to the default if it's unplugged), separate tracks, and the mic's volume.
+- **Soundboard:** the soundboard service address and upload key (see
+  [Soundboards](#soundboards)).
 - **Clips folder:** open or change it; copy clips to the clipboard; show
   notifications.
 - **Startup:** **Start with Windows**.
@@ -204,6 +226,7 @@ clipboard = true
 notifications = true
 check_updates = true         # look for new versions (never installs without asking)
 speakers = true              # record who talks when in each clip (see Who talked)
+soundboard_url =             # your group's soundboard service; empty = off (see Soundboards)
 theme = discord              # discord (follow Discord), dark or light
 ```
 
@@ -222,6 +245,7 @@ Each is a small text file, rewritten as things change:
 | `discord-theme.txt` | The last Discord theme read, used until the next read works |
 | `clip-speakers.json` | Who talked when in each clip, by Discord user id |
 | `discord-users.json` | Names and avatar ids of the people in your clips, by user id |
+| `soundboard-key.bin` | The soundboard upload key, encrypted for your Windows user (DPAPI) |
 
 ## Releases
 
@@ -303,11 +327,15 @@ it from the tray before copying a new build over it).
 | --- | --- |
 | `src/main.rs` | Startup, single-instance check, CLI overrides, Discord supervisor thread |
 | `src/tray/` | The tray app (main thread): `mod.rs` app state + message loop, `notify_icon.rs` tray icon/tooltip (incl. the clips line)/notifications, `menu.rs` right-click menu, `global_hotkey.rs` save-clip hotkey, `actions.rs` saving clips, opening folders, opening a saved clip in the window, `window.rs` snapshot/commands for the window, folder picker, update hand-off |
-| `src/ui/` | The window (egui, own thread): `mod.rs` command/snapshot API + window lifecycle, `theme.rs` Discord colours/fonts, the palette that follows Discord and the gradient backdrop, `follow.rs` watching and reading Discord's theme, `widgets.rs` buttons/toggles/sliders/dropdowns, `sidebar.rs` page list + status card, `keybind.rs` hotkey recorder, `edit.rs` Edit dialog (incl. the people who talk), `avatars.rs` Discord profile pictures (download, disk cache, PNG decode), `confirm.rs` confirm dialog, one file per page (`clips.rs`, `settings.rs`, `updates.rs`) |
+| `src/ui/` | The window (egui, own thread): `mod.rs` command/snapshot API + window lifecycle, `theme.rs` Discord colours/fonts, the palette that follows Discord and the gradient backdrop, `follow.rs` watching and reading Discord's theme, `widgets.rs` buttons/toggles/sliders/dropdowns, `sidebar.rs` page list + status card, `keybind.rs` hotkey recorder, `edit.rs` Edit dialog (incl. the people who talk), `avatars.rs` Discord profile pictures (download, disk cache, PNG decode), `confirm.rs` confirm dialog, `upload.rs` upload-to-soundboard dialog, `emoji_picker.rs` emoji picker, one file per page (`clips.rs`, `soundboards.rs`, `settings.rs`, `updates.rs`) |
 | `src/icon.rs` | The app icon, drawn in code: at runtime for the tray and window, and at build time for the exe |
 | `build.rs` | Embeds the icon and version info in the exe (`winresource`), so the taskbar, Start menu and Explorer show it |
 | `src/autostart.rs` | "Start with Windows": the `Discord Clip` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (same as the installer), incl. Task Manager's Startup apps switch |
-| `src/update.rs` | Update checks and in-app updates: fetches `latest.json` over WinHTTP, downloads + SHA-256-verifies the installer or portable exe, hands over to it |
+| `src/update.rs` | Update checks and in-app updates: fetches `latest.json`, downloads + SHA-256-verifies the installer or portable exe, hands over to it |
+| `src/http.rs` | HTTPS over WinHTTP (system TLS, proxy and certificates) |
+| `src/soundboard.rs` | Client for the soundboard service: servers, slots, invite links, uploads |
+| `src/secret.rs` | The soundboard upload key, encrypted with DPAPI |
+| `worker/` | The soundboard service (Cloudflare Worker) each group hosts itself |
 | `src/config.rs` | `config.ini` load/save/validation |
 | `src/hotkey.rs` | Parsing/formatting `Ctrl+Alt+C`-style hotkeys |
 | `src/capture.rs` | Finds the root Discord process; process-loopback / mic WASAPI streams in a fixed 48 kHz stereo format, event-driven; pads silence when the stream goes quiet so the buffer stays in step with real time |

@@ -335,3 +335,23 @@ fn chevron(painter: &egui::Painter, c: egui::Pos2, up: bool, color: Color32) {
     painter.line_segment([c + vec2(-5.0, -dy), c + vec2(0.0, dy)], s);
     painter.line_segment([c + vec2(0.0, dy), c + vec2(5.0, -dy)], s);
 }
+
+/// A Discord-style text field, 40 px tall (`password` hides what's typed).
+pub fn text_field(ui: &mut Ui, value: &mut String, hint: &str, password: bool, width: f32) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+    let edit = egui::TextEdit::singleline(value)
+        .frame(egui::Frame::NONE)
+        .password(password)
+        .font(font(15.0, Weight::Regular))
+        .text_color(pal().text_normal)
+        .hint_text(RichText::new(hint).color(pal().text_muted))
+        .desired_width(rect.width() - 20.0);
+    // The box first, so the text is drawn on top of it.
+    ui.painter().rect_filled(rect, CornerRadius::same(4), pal().bg_tertiary);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 0.0))).layout(Layout::left_to_right(Align::Center)));
+    let resp = child.add(edit);
+    if resp.has_focus() {
+        ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, BLURPLE), egui::StrokeKind::Inside);
+    }
+    resp
+}
