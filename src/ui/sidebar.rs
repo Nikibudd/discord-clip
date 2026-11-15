@@ -38,6 +38,13 @@ pub fn show(ui: &mut Ui, page: &mut Page, snap: &Snapshot, icons: &Icons) {
         });
         ui.add_space(8.0);
         for p in Page::ALL {
+            // Soundboards (#76) only once a soundboard service is set up.
+            if p == Page::Soundboards && snap.cfg.soundboard_url.is_empty() {
+                if *page == p {
+                    *page = Page::Settings; // just turned off
+                }
+                continue;
+            }
             let badge = p == Page::Updates
                 && matches!(snap.update.state, State::Available(_) | State::Downloading { .. } | State::Ready { .. });
             if nav_item(ui, p.title(), *page == p, badge).clicked() {

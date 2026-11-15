@@ -6,13 +6,13 @@
 //
 // Endpoints (see README.md for the shapes):
 //   GET  /                         checks the token works
-//   GET  /servers?user=<id>        servers shared by the bot and that user
-//   GET  /servers/<id>?user=<id>   one server's soundboard: slots and sounds
+//   GET  /servers                  the bot's servers (one Discord call)
+//   GET  /servers/<id>?user=<id>   one server's soundboard, if the user is in it
 //   POST /invites                  invite links -> servers missing the bot
 //   POST /upload                   adds a sound
 //
-// The free plan allows 50 Discord calls per request, so the server list only
-// checks membership; slots are fetched per server.
+// The free plan allows 50 Discord calls per request, so every request makes
+// only a few.
 
 const API = "https://discord.com/api/v10";
 
@@ -44,7 +44,7 @@ export default {
       const one = path.match(/^\/servers\/(\d{15,21})$/);
       if (request.method === "GET" && path === "/") return await status(env);
       if (request.method === "GET" && path === "/servers") {
-        return await servers(env, userParam(url));
+        return await servers(env);
       }
       if (request.method === "GET" && one) {
         return await server(env, one[1], userParam(url));
@@ -57,7 +57,7 @@ export default {
       }
       return json({ error: "Not found." }, 404);
     } catch (e) {
-      if (e instanceof BadRequest) return json({ error: e.message }, e.status);
+      if (e instanceof BadRequest) return json({ error: e.message, ...e.extra }, e.status);
       if (e instanceof DiscordError) {
         return json({ error: e.message, discord: e.body }, e.status);
       }
@@ -71,15 +71,14 @@ async function status(env) {
   return json({ ok: true, bot: { id: me.id, name: me.username } });
 }
 
-// Servers the bot and the user are both in.
-async function servers(env, user) {
+// The bot's servers, in one Discord call. Whether the user is in one is
+// checked per server by /servers/<id> (which the app asks for anyway, for the
+// slots) and again on upload, so no single request nears the free plan's 50
+// Discord calls.
+async function servers(env) {
   const guilds = await botGuilds(env);
-  const shared = [];
-  for (const g of guilds) {
-    if (await isMember(env, g.id, user)) shared.push(g);
-  }
   return json({
-    servers: shared.map((g) => ({
+    servers: guilds.map((g) => ({
       id: g.id,
       name: g.name,
       icon: iconUrl(g),
@@ -220,7 +219,7 @@ async function isMember(env, guildId, user) {
 
 async function requireMember(env, guildId, user) {
   if (!(await isMember(env, guildId, user))) {
-    throw new BadRequest("You're not in that server, or the bot isn't.", 403);
+    throw new BadRequest("You're not in that server, or the bot isn't.", 403, { not_member: true });
   }
 }
 
@@ -254,9 +253,10 @@ function installUrl(appId, guildId) {
 // --- helpers ---------------------------------------------------------------
 
 class BadRequest extends Error {
-  constructor(message, status = 400) {
+  constructor(message, status = 400, extra = {}) {
     super(message);
     this.status = status;
+    this.extra = extra;
   }
 }
 

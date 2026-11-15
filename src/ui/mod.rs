@@ -14,9 +14,12 @@
 mod clips;
 mod confirm;
 mod edit;
+mod emoji_picker;
 mod follow;
 mod keybind;
 mod settings;
+mod soundboards;
+mod upload;
 mod avatars;
 mod sidebar;
 mod theme;
@@ -62,6 +65,8 @@ pub enum Command {
     SetNotifications(bool),
     /// Record who talks when (#66, #67).
     SetSpeakers(bool),
+    /// The soundboard service address (#76); empty = off.
+    SetSoundboardUrl(String),
     PickFolder,
     OpenFolder,
     OpenLog,
@@ -266,16 +271,19 @@ fn run_window() -> eframe::Result {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Page {
     Clips,
+    /// Only shown once a soundboard service is set up (#76).
+    Soundboards,
     Settings,
     Updates,
 }
 
 impl Page {
-    const ALL: [Page; 3] = [Page::Clips, Page::Settings, Page::Updates];
+    const ALL: [Page; 4] = [Page::Clips, Page::Soundboards, Page::Settings, Page::Updates];
 
     fn title(self) -> &'static str {
         match self {
             Page::Clips => "Clips",
+            Page::Soundboards => "Soundboards",
             Page::Settings => "Settings",
             Page::Updates => "Updates",
         }
@@ -292,6 +300,7 @@ struct ClipWindow {
     page: Page,
     clips: clips::ClipsPage,
     settings: settings::SettingsPage,
+    soundboards: soundboards::SoundboardsPage,
     icons: Icons,
     theme: follow::Follower,
 }
@@ -316,6 +325,7 @@ impl ClipWindow {
             page: Page::Clips,
             clips: clips::ClipsPage::default(),
             settings: settings::SettingsPage::default(),
+            soundboards: soundboards::SoundboardsPage::default(),
             icons: Icons { active: texture("icon-active", BLURPLE_RGB), idle: texture("icon-idle", IDLE_RGB) },
             theme: follow::Follower::start(),
         }
@@ -346,6 +356,7 @@ fn set(cmd: Command) {
             Command::SetClipboard(c) => snap.cfg.clipboard = *c,
             Command::SetNotifications(n) => snap.cfg.notifications = *n,
             Command::SetSpeakers(on) => snap.cfg.speakers = *on,
+            Command::SetSoundboardUrl(url) => snap.cfg.soundboard_url = url.clone(),
             Command::SetCheckUpdates(c) => snap.cfg.check_updates = *c,
             Command::SetSeparateTracks(s) => snap.cfg.separate_tracks = *s,
             Command::SetFormat(f) => snap.cfg.format = *f,
@@ -417,6 +428,7 @@ impl eframe::App for ClipWindow {
                     }
                     match self.page {
                         Page::Clips => self.clips.show(ui, &snap),
+                        Page::Soundboards => self.soundboards.show(ui, &snap),
                         Page::Settings => self.settings.show(ui, &snap, &self.theme),
                         Page::Updates => updates::show(ui, &snap, &self.icons.active),
                     }

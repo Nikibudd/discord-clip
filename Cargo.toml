@@ -20,7 +20,9 @@ libflac-rs = "=0.143.1"
 symphonia = { version = "0.6.1", default-features = false, features = ["mp3"] }
 anyhow = "1"
 windows-core = "0.58"
-eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "clipboard"] }
+# Colour emoji (Segoe UI Emoji) for soundboard sounds (#76).
+epaint = { version = "0.37.0", features = ["color_fonts"] }
 winit = { version = "0.30", default-features = false }
 raw-window-handle = "0.6"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -30,6 +32,7 @@ sha2 = "0.11.1"
 semver = "1.0.28"
 # Snappy, for reading Discord's Local Storage (#37).
 snap = "1"
+emojis = "0.9.1"
 
 [build-dependencies]
 # Embeds the app icon in the exe (#42).
@@ -67,4 +70,5 @@ features = [
     "Win32_System_Environment",
     "Win32_System_Registry",
     "Win32_System_Pipes",
+    "Win32_Security_Cryptography",
 ]

@@ -32,8 +32,8 @@ Every request sends `Authorization: Key <UPLOAD_KEY>` when a key is set.
 | Request | Answer |
 | --- | --- |
 | `GET /` | `{ ok, bot: { id, name } }` |
-| `GET /servers?user=<id>` | `{ servers: [{ id, name, icon, can_upload }] }`: servers shared by the bot and the user. `can_upload` is false when the bot lacks **Create Expressions** there. |
-| `GET /servers/<server id>?user=<id>` | `{ id, name, icon, tier, used, total, sounds: [{ id, name, emoji, available }] }`. `total` is `null` when Discord gave the server extra slots it doesn't report. |
+| `GET /servers` | `{ servers: [{ id, name, icon, can_upload }] }`: all the bot's servers, in one Discord call. `can_upload` is false when the bot lacks **Create Expressions** there. The app hides servers the user isn't in by asking for each one's soundboard. |
+| `GET /servers/<server id>?user=<id>` | `{ id, name, icon, tier, used, total, sounds: [{ id, name, emoji, available }] }`. `total` is `null` when Discord gave the server extra slots it doesn't report. A user who isn't in the server gets `403 { error, not_member: true }`. |
 | `POST /invites` with `{ "links": "<pasted text>" }` | `{ servers: [{ id, name, icon, has_bot, install_url }], invalid: [codes] }`: at most 25 invite links at once. |
 | `POST /upload` with `{ user, guild, name, sound, emoji?, volume? }` | `201 { id, name }`. `sound` is `data:audio/mpeg;base64,…` (or `audio/ogg`), at most 512 KB and 5.2 s; `name` is 2–32 characters; `emoji` is a Unicode emoji or a custom emoji id; `volume` is 0–1. |
 

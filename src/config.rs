@@ -25,6 +25,9 @@ pub struct Config {
     pub check_updates: bool,
     /// Record who talks when in each clip (#66).
     pub speakers: bool,
+    /// The soundboard service (#76): a group's own Cloudflare Worker URL.
+    /// Empty = off. Its upload key is kept encrypted elsewhere (`secret`).
+    pub soundboard_url: String,
     /// Window colours (#37).
     pub theme: ThemeMode,
 }
@@ -44,6 +47,7 @@ impl Default for Config {
             notifications: true,
             check_updates: true,
             speakers: true,
+            soundboard_url: String::new(),
             theme: ThemeMode::Discord,
         }
     }
@@ -151,6 +155,15 @@ fn expand_env(s: &str) -> String {
     String::from_utf16_lossy(&buf[..n - 1])
 }
 
+/// An https address without spaces, or empty.
+pub fn validate_soundboard_url(v: &str) -> Result<String> {
+    let v = v.trim().trim_end_matches('/');
+    if !v.is_empty() && (!v.starts_with("https://") || v.len() <= 8 || v.contains(char::is_whitespace)) {
+        bail!("soundboard_url must be an https:// address");
+    }
+    Ok(v.to_string())
+}
+
 pub fn validate_seconds(n: u32) -> Result<u32> {
     if (1..=300).contains(&n) {
         Ok(n)
@@ -190,6 +203,7 @@ impl Config {
             "clipboard" => self.clipboard = parse_bool(key, v)?,
             "notifications" => self.notifications = parse_bool(key, v)?,
             "speakers" => self.speakers = parse_bool(key, v)?,
+            "soundboard_url" => self.soundboard_url = validate_soundboard_url(v)?,
             "check_updates" => self.check_updates = parse_bool(key, v)?,
             "theme" => {
                 self.theme = ThemeMode::from_key(v)
@@ -270,6 +284,10 @@ check_updates = {}
 # only its voice connection log lines and speaking events, never your login)
 speakers = {}
 
+# Your group's soundboard service (see worker/README.md), e.g.
+# https://name.you.workers.dev. Empty = off. Keep it private.
+soundboard_url = {}
+
 # Window colours: discord (follow the theme you use in Discord), dark or light
 theme = {}
 ",
@@ -285,6 +303,7 @@ theme = {}
             self.notifications,
             self.check_updates,
             self.speakers,
+            self.soundboard_url,
             self.theme.key()
         )
     }
