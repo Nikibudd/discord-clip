@@ -1,0 +1,15 @@
+// Copy this file to wrangler.jsonc and set "name" to your Worker's name.
+// wrangler.jsonc is git-ignored: the Worker name is part of its URL, and the
+// URL is what keeps strangers from uploading, so it stays out of the repo.
+//
+// The bot token and the optional upload key are NOT set here. Add them as
+// secrets in the Cloudflare dashboard (Worker > Settings > Variables and
+// Secrets) or with `npx wrangler secret put DISCORD_BOT_TOKEN` / `UPLOAD_KEY`.
+{
+  "name": "your-worker-name",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-15",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": true }
+}
