@@ -53,6 +53,12 @@ pub struct ClipsPage {
     renaming: Option<(PathBuf, String)>,
     /// The Edit dialog, while it's open.
     edit: Option<super::edit::EditDialog>,
+    /// The soundboard upload dialog (#76), while it's open.
+    upload: Option<super::upload::UploadDialog>,
+    /// A clip to open the upload dialog for on the next frame.
+    upload_next: Option<PathBuf>,
+    /// The soundboard service address from the settings; empty = off.
+    soundboard_url: String,
     /// The clip whose ⋯ menu is open.
     menu: Option<PathBuf>,
     /// Stored track volumes of all clips (#7), reloaded with each scan.
@@ -213,6 +219,8 @@ enum Action {
     DiscordReady { too_long: bool, tracks: bool },
     /// Mark or unmark as uploaded to a soundboard (#28).
     SetUploaded(bool),
+    /// Upload a Discord-ready clip to a soundboard (#76).
+    Upload,
 }
 
 /// How a card's player looks this frame.
@@ -236,6 +244,7 @@ impl ClipsPage {
     pub fn on_hide(&mut self) {
         self.stop();
         self.edit = None;
+        self.upload = None;
         self.confirm = None;
         self.renaming = None;
         self.menu = None;
@@ -286,6 +295,7 @@ impl ClipsPage {
     }
 
     pub fn show(&mut self, ui: &mut Ui, snap: &Snapshot) {
+        self.soundboard_url.clone_from(&snap.cfg.soundboard_url);
         self.refresh(ui.ctx(), &snap.cfg.out_dir);
         self.update_playing(ui.ctx());
 
@@ -406,6 +416,7 @@ impl ClipsPage {
         }
 
         self.show_edit(ui.ctx());
+        self.show_upload(ui.ctx());
         self.show_confirm(ui.ctx());
         self.show_toast(ui);
     }
@@ -750,7 +761,8 @@ impl ClipsPage {
                     }
                     _ => 0.0,
                 };
-                let card = Card { view, menu_open, custom_mix, uploaded, selected, highlight };
+                let soundboard = !self.soundboard_url.is_empty();
+                let card = Card { view, menu_open, custom_mix, uploaded, selected, highlight, soundboard };
                 if let Some(action) = tile(ui, rect, clip, analysis, card, editing, today) {
                     self.act(action, clip);
                 }
@@ -802,6 +814,11 @@ impl ClipsPage {
                     library::Tracks::Mic => "Copied your mic only",
                 };
                 self.toast = Some((format!("{what}. Paste it into a Discord chat with Ctrl+V."), Instant::now()));
+                Ok(())
+            }
+            Action::Upload => {
+                self.stop();
+                self.upload_next = Some(clip.path.clone());
                 Ok(())
             }
             Action::Show => {
@@ -927,6 +944,25 @@ impl ClipsPage {
         }
         self.uploaded = uploaded::load();
         crate::tray::post_library_changed(); // renamed or replaced (#48)
+    }
+
+    /// Opens the upload dialog (#76) when asked, shows it while it's open, and
+    /// marks the clip as uploaded once it's done.
+    fn show_upload(&mut self, ctx: &egui::Context) {
+        if let Some(path) = self.upload_next.take() {
+            match crate::soundboard::Service::new(&self.soundboard_url, crate::secret::upload_key()) {
+                Some(service) => self.upload = Some(super::upload::UploadDialog::open(ctx, service, &path)),
+                None => self.toast = Some(("Set up the soundboard service in Settings first.".into(), Instant::now())),
+            }
+        }
+        let Some(dialog) = &mut self.upload else { return };
+        let Some(outcome) = dialog.show(ctx) else { return };
+        let path = dialog.clip().to_path_buf();
+        self.upload = None;
+        if let super::upload::Outcome::Uploaded(server) = outcome {
+            self.set_uploaded(&path, true);
+            self.toast = Some((format!("Uploaded to {server}'s soundboard."), Instant::now()));
+        }
     }
 
     /// Opens the Edit dialog to pick the part for the soundboard.
@@ -1145,6 +1181,8 @@ struct Card {
     selected: bool,
     /// Just pointed out (#50), fading from 1 to 0.
     highlight: f32,
+    /// A soundboard service is set up (#76): ready clips get an Upload button.
+    soundboard: bool,
 }
 
 /// Draws one card and returns what the user clicked.
@@ -1157,7 +1195,7 @@ fn tile(
     editing: Option<&mut String>,
     today: i32,
 ) -> Option<Action> {
-    let Card { view, menu_open, custom_mix, uploaded, selected, highlight } = card_state;
+    let Card { view, menu_open, custom_mix, uploaded, selected, highlight, soundboard } = card_state;
     let id = ui.make_persistent_id(("clip", &clip.path));
     let card = ui.interact(rect, id, Sense::hover());
     let fill = if card.hovered() { mix(pal().bg_secondary, pal().bg_hover, 0.6) } else { pal().bg_secondary };
@@ -1325,7 +1363,17 @@ fn tile(
     row.spacing_mut().item_spacing.x = 8.0;
     // The main action is the soundboard (#25); Copy (for chats) is in the ⋯ menu.
     let ready = matches!(analysis, Some(Ok(a)) if library::is_discord_ready(clip, a.seconds, a.channels, custom_mix));
-    if ready {
+    if ready && soundboard {
+        // #76: straight to your group's soundboard servers.
+        let label = if uploaded { "Upload again" } else { "Upload to soundboard" };
+        let kind = if uploaded { ButtonKind::Secondary } else { ButtonKind::Primary };
+        if button_sized(&mut row, label, kind, 30.0)
+            .on_hover_text("Pick one of your soundboard servers and add this clip as a sound")
+            .clicked()
+        {
+            action = Some(Action::Upload);
+        }
+    } else if ready {
         if button_sized(&mut row, "Show in Explorer", ButtonKind::Secondary, 30.0)
             .on_hover_text("This clip is ready for Discord's soundboard: pick this file when you upload a sound")
             .clicked()

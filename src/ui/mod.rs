@@ -14,9 +14,12 @@
 mod clips;
 mod confirm;
 mod edit;
+mod emoji_picker;
 mod follow;
 mod keybind;
 mod settings;
+mod soundboards;
+mod upload;
 mod avatars;
 mod sidebar;
 mod theme;
@@ -62,6 +65,8 @@ pub enum Command {
     SetNotifications(bool),
     /// Record who talks when (#66, #67).
     SetSpeakers(bool),
+    /// The soundboard service address (#76); empty = off.
+    SetSoundboardUrl(String),
     PickFolder,
     OpenFolder,
     OpenLog,
@@ -266,16 +271,19 @@ fn run_window() -> eframe::Result {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Page {
     Clips,
+    /// Only shown once a soundboard service is set up (#76).
+    Soundboards,
     Settings,
     Updates,
 }
 
 impl Page {
-    const ALL: [Page; 3] = [Page::Clips, Page::Settings, Page::Updates];
+    const ALL: [Page; 4] = [Page::Clips, Page::Soundboards, Page::Settings, Page::Updates];
 
     fn title(self) -> &'static str {
         match self {
             Page::Clips => "Clips",
+            Page::Soundboards => "Soundboards",
             Page::Settings => "Settings",
             Page::Updates => "Updates",
         }
@@ -292,6 +300,7 @@ struct ClipWindow {
     page: Page,
     clips: clips::ClipsPage,
     settings: settings::SettingsPage,
+    soundboards: soundboards::SoundboardsPage,
     icons: Icons,
     theme: follow::Follower,
 }
@@ -316,6 +325,7 @@ impl ClipWindow {
             page: Page::Clips,
             clips: clips::ClipsPage::default(),
             settings: settings::SettingsPage::default(),
+            soundboards: soundboards::SoundboardsPage::default(),
             icons: Icons { active: texture("icon-active", BLURPLE_RGB), idle: texture("icon-idle", IDLE_RGB) },
             theme: follow::Follower::start(),
         }
@@ -346,6 +356,7 @@ fn set(cmd: Command) {
             Command::SetClipboard(c) => snap.cfg.clipboard = *c,
             Command::SetNotifications(n) => snap.cfg.notifications = *n,
             Command::SetSpeakers(on) => snap.cfg.speakers = *on,
+            Command::SetSoundboardUrl(url) => snap.cfg.soundboard_url = url.clone(),
             Command::SetCheckUpdates(c) => snap.cfg.check_updates = *c,
             Command::SetSeparateTracks(s) => snap.cfg.separate_tracks = *s,
             Command::SetFormat(f) => snap.cfg.format = *f,
@@ -408,18 +419,30 @@ impl eframe::App for ClipWindow {
             if snap.restart_needed {
                 settings::restart_bar(ui);
             }
+            // The width pages are centred in, measured outside the scroll area:
+            // a scrollbar on long pages mustn't shift the centre.
+            let page_width = ui.available_width() - 80.0;
             // Each page keeps its own scroll position.
             egui::ScrollArea::vertical().id_salt(self.page).auto_shrink(false).show(ui, |ui| {
                 Frame::new().inner_margin(Margin { left: 40, right: 40, top: 40, bottom: 40 }).show(ui, |ui| {
-                    // Text pages keep a reading width; the clips grid uses the window (#45).
-                    if self.page != Page::Clips {
-                        ui.set_max_width(ui.available_width().min(READING_WIDTH));
-                    }
-                    match self.page {
-                        Page::Clips => self.clips.show(ui, &snap),
-                        Page::Settings => self.settings.show(ui, &snap, &self.theme),
-                        Page::Updates => updates::show(ui, &snap, &self.icons.active),
-                    }
+                    // Text pages keep a reading width, centred once the window is
+                    // wider, like Discord's settings; the clips grid (#45) and the
+                    // soundboard cards (#76) use the whole window.
+                    let full = matches!(self.page, Page::Clips | Page::Soundboards);
+                    let avail = ui.available_width();
+                    let width = if full { avail } else { avail.min(READING_WIDTH) };
+                    ui.horizontal_top(|ui| {
+                        ui.add_space(((page_width - width) / 2.0).min(avail - width).max(0.0));
+                        ui.vertical(|ui| {
+                            ui.set_width(width);
+                            match self.page {
+                                Page::Clips => self.clips.show(ui, &snap),
+                                Page::Soundboards => self.soundboards.show(ui, &snap),
+                                Page::Settings => self.settings.show(ui, &snap, &self.theme),
+                                Page::Updates => updates::show(ui, &snap, &self.icons.active),
+                            }
+                        });
+                    });
                 });
             });
         });

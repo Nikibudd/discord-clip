@@ -95,6 +95,7 @@ pub(super) fn handle_ui_command(app: &App, cmd: Command) {
         Command::SetClipboard(on) => update_settings(app, |c| c.clipboard = on),
         Command::SetNotifications(on) => update_settings(app, |c| c.notifications = on),
         Command::SetSpeakers(on) => update_settings(app, |c| c.speakers = on),
+        Command::SetSoundboardUrl(url) => update_settings(app, |c| c.soundboard_url = url.clone()),
         Command::SetSeparateTracks(on) => update_settings(app, |c| c.separate_tracks = on),
         Command::SetTheme(t) => update_settings(app, |c| c.theme = t),
         Command::SetFormat(f) => {

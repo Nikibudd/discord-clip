@@ -48,10 +48,15 @@ pub fn setup_fonts(ctx: &egui::Context) {
     let regular = load("segoe", "segoeui.ttf");
     let semibold = load("segoe-semibold", "seguisb.ttf");
     let bold = load("segoe-bold", "segoeuib.ttf");
+    // Emoji (#76: soundboard sounds have one), in colour.
+    let emoji = load("segoe-emoji", "seguiemj.ttf");
 
     let mut base = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     if let Some(r) = &regular {
         base.insert(0, r.clone());
+    }
+    if let Some(e) = &emoji {
+        base.push(e.clone());
     }
     let with_first = |first: &Option<String>| {
         let mut list = base.clone();

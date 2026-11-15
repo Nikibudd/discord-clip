@@ -87,7 +87,7 @@ fn load(user_id: &str, hash: Option<&str>) -> Option<ColorImage> {
         return Some(image);
     }
     let mut bytes = Vec::new();
-    let got = crate::update::http_get(&url(user_id, hash), |chunk| {
+    let got = crate::http::get(&url(user_id, hash), |chunk| {
         bytes.extend_from_slice(chunk);
         anyhow::ensure!(bytes.len() < 2 << 20, "picture too big");
         Ok(())
