@@ -1,0 +1,8 @@
+# Your own config: the Worker name is part of its private URL.
+wrangler.jsonc
+wrangler.toml
+# Local secrets for `wrangler dev`.
+.dev.vars
+.dev.vars.*
+.wrangler/
+node_modules/
