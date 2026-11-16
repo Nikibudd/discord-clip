@@ -681,7 +681,7 @@ mod tests {
         // Nothing marked: no uploaded count.
         assert_eq!(summary(&clips, &none, now), ["3 clips", "last saved 2 min ago"]);
         let mut marked = crate::uploaded::Set::new();
-        marked.insert(clips[1].path.to_string_lossy().to_lowercase()); // as `uploaded` keys it
+        marked.insert(crate::uploaded::key(&clips[1].path), vec![]);
         assert_eq!(summary(&clips, &marked, now), ["3 clips", "2 not uploaded", "last saved 2 min ago"]);
         // One clip without a date in its name: no last save.
         assert_eq!(summary(&clips[2..], &none, now), ["1 clip"]);

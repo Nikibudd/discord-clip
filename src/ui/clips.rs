@@ -29,6 +29,8 @@ use crate::volumes::{self, Volumes};
 const RESCAN_EVERY: Duration = Duration::from_secs(2);
 const TILE_MIN_WIDTH: f32 = 250.0;
 const TILE_HEIGHT: f32 = 186.0;
+/// The extra line on cards that name their upload servers (#84).
+const SERVERS_LINE: f32 = 18.0;
 const GAP: f32 = 16.0;
 
 type Analyses = Arc<Mutex<HashMap<PathBuf, (SystemTime, Result<Analysis, String>)>>>;
@@ -65,8 +67,9 @@ pub struct ClipsPage {
     volumes: volumes::Table,
     /// Clips marked as uploaded (#28), reloaded with each scan.
     uploaded: uploaded::Set,
-    /// A confirm dialog (#30), the clip it's about, and what to do once confirmed.
-    confirm: Option<(super::confirm::ConfirmDialog, ClipFile, Pending)>,
+    /// A confirm dialog (#30), the clips it's about (several with a
+    /// multi-selection, #83), and what to do once confirmed.
+    confirm: Option<(super::confirm::ConfirmDialog, Vec<ClipFile>, Pending)>,
     /// Which clips are shown (#29). Not saved: every start shows the ones
     /// not uploaded yet.
     filter: Filter,
@@ -79,8 +82,12 @@ pub struct ClipsPage {
     talkers: HashMap<String, BTreeSet<String>>,
     users: crate::speakers::Users,
     avatars: super::avatars::Avatars,
-    /// The selected card, for the keyboard shortcuts (#47).
+    /// The selected card, for the keyboard shortcuts (#47). With several
+    /// selected (#83) it's the one Shift+click ranges from.
     selected: Option<PathBuf>,
+    /// All selected cards (#83), including `selected`. Only visible ones
+    /// count; the others drop out each frame.
+    picked: HashSet<PathBuf>,
     /// Scroll the selected card into view when it's next drawn (moved with
     /// the arrow keys).
     scroll_to_selected: bool,
@@ -88,6 +95,8 @@ pub struct ClipsPage {
     focus: Option<PathBuf>,
     /// The highlighted card and when it was highlighted (fades out).
     highlight: Option<(PathBuf, Instant)>,
+    /// The selection bar (#83) is shown: toasts go above it.
+    bar_shown: bool,
 }
 
 /// How long a highlighted card takes to fade back (#50).
@@ -111,11 +120,16 @@ enum Shortcut {
     Delete,
     DiscordReady,
     Copy,
+    /// Ctrl+A (#83).
+    SelectAll,
 }
 
 /// The shortcut for a key press, if any. Held keys repeat only for moving.
 fn shortcut_for(key: egui::Key, modifiers: egui::Modifiers, repeat: bool, cols: usize) -> Option<Shortcut> {
     use egui::Key;
+    if key == Key::A && modifiers.matches_exact(egui::Modifiers::COMMAND) && !repeat {
+        return Some(Shortcut::SelectAll);
+    }
     if !modifiers.is_none() {
         return None;
     }
@@ -280,9 +294,60 @@ impl ClipsPage {
             return; // shown from the next frame on
         }
         self.focus = None;
-        self.selected = Some(path.clone());
+        self.select_only(&path);
         self.scroll_to_selected = true;
         self.highlight = Some((path, Instant::now()));
+    }
+
+    /// Selects just this card.
+    fn select_only(&mut self, path: &Path) {
+        self.selected = Some(path.to_path_buf());
+        self.picked.clear();
+        self.picked.insert(path.to_path_buf());
+    }
+
+    fn deselect(&mut self) {
+        self.selected = None;
+        self.picked.clear();
+    }
+
+    /// The selected clips among `visible`, in their order (#83).
+    fn selection(&self, visible: &[ClipFile]) -> Vec<ClipFile> {
+        visible.iter().filter(|c| self.is_picked(&c.path)).cloned().collect()
+    }
+
+    fn is_picked(&self, path: &Path) -> bool {
+        self.picked.contains(path) || self.selected.as_deref() == Some(path)
+    }
+
+    /// A press on a card: a plain one selects just it; Ctrl adds or removes
+    /// it; Shift selects the range from the last selected card (#83).
+    fn press_card(&mut self, path: &Path, modifiers: egui::Modifiers, visible: &[ClipFile]) {
+        if modifiers.command {
+            if let Some(s) = self.selected.clone() {
+                self.picked.insert(s);
+            }
+            if self.picked.remove(path) {
+                if self.selected.as_deref() == Some(path) {
+                    self.selected = visible.iter().find(|c| self.picked.contains(&c.path)).map(|c| c.path.clone());
+                }
+            } else {
+                self.picked.insert(path.to_path_buf());
+                self.selected = Some(path.to_path_buf());
+            }
+        } else if modifiers.shift {
+            let anchor = self.selected.as_ref().and_then(|s| visible.iter().position(|c| &c.path == s));
+            let to = visible.iter().position(|c| c.path == path);
+            match (anchor, to) {
+                (Some(a), Some(b)) => {
+                    let (lo, hi) = (a.min(b), a.max(b));
+                    self.picked = visible[lo..=hi].iter().map(|c| c.path.clone()).collect();
+                }
+                _ => self.select_only(path),
+            }
+        } else {
+            self.select_only(path);
+        }
     }
 
     fn is_loaded(&self, clip: &ClipFile) -> bool {
@@ -322,6 +387,9 @@ impl ClipsPage {
             all.iter().filter(|c| !shown_by_filter(c) && matches_search(c, &query, today)).count()
         };
         self.resolve_focus(&all, &visible, today);
+        // Hidden clips drop out of the selection (#83).
+        let shown_paths: HashSet<&PathBuf> = visible.iter().map(|c| &c.path).collect();
+        self.picked.retain(|p| shown_paths.contains(p));
 
         // Header
         let width = ui.available_width();
@@ -413,6 +481,12 @@ impl ClipsPage {
             }
         } else {
             self.grid(ui, &visible, today);
+        }
+        let selection = self.selection(&visible);
+        self.bar_shown = selection.len() > 1;
+        if self.bar_shown {
+            ui.add_space(64.0); // room to scroll the last row above the bar
+            self.selection_bar(ui, &selection);
         }
 
         self.show_edit(ui.ctx());
@@ -669,7 +743,7 @@ impl ClipsPage {
                     _ => None,
                 };
                 // Esc with nothing selected is left alone.
-                let ours = s.is_some_and(|s| s != Shortcut::Deselect || self.selected.is_some());
+                let ours = s.is_some_and(|s| s != Shortcut::Deselect || self.selected.is_some() || !self.picked.is_empty());
                 if ours {
                     found.extend(s);
                 }
@@ -678,14 +752,29 @@ impl ClipsPage {
         });
         for s in found {
             let index = self.selected.as_ref().and_then(|p| visible.iter().position(|c| &c.path == p));
+            let selection = self.selection(visible);
             match s {
                 Shortcut::Move(step) => {
                     if let Some(to) = moved(index, step, visible.len()) {
-                        self.selected = Some(visible[to].path.clone());
+                        let path = visible[to].path.clone();
+                        self.select_only(&path);
                         self.scroll_to_selected = true;
                     }
                 }
-                Shortcut::Deselect => self.selected = None,
+                // Several selected: back to the one card first (#83).
+                Shortcut::Deselect if selection.len() > 1 => match self.selected.clone() {
+                    Some(p) => self.select_only(&p),
+                    None => self.deselect(),
+                },
+                Shortcut::Deselect => self.deselect(),
+                Shortcut::SelectAll => {
+                    self.picked = visible.iter().map(|c| c.path.clone()).collect();
+                    if index.is_none() {
+                        self.selected = visible.first().map(|c| c.path.clone());
+                    }
+                }
+                Shortcut::Delete if selection.len() > 1 => self.ask_delete_many(selection),
+                Shortcut::DiscordReady if selection.len() > 1 => self.ask_discord_ready_many(selection),
                 _ => {
                     // The rest act on the selected card, if it's shown.
                     let Some(clip) = index.map(|i| visible[i].clone()) else { continue };
@@ -708,7 +797,7 @@ impl ClipsPage {
                                 tracks: a.as_ref().is_some_and(|a| a.channels == crate::clip::TRACK_CHANNELS),
                             }
                         }
-                        Shortcut::Move(_) | Shortcut::Deselect => continue,
+                        Shortcut::Move(_) | Shortcut::Deselect | Shortcut::SelectAll => continue,
                     };
                     self.act(action, &clip);
                 }
@@ -726,10 +815,13 @@ impl ClipsPage {
         let analyses = self.analyses.lock().unwrap().clone();
 
         for row in clips.chunks(cols) {
-            let (row_rect, _) = ui.allocate_exact_size(vec2(width, TILE_HEIGHT), Sense::hover());
+            // A row with a card naming its upload servers is a line taller (#84).
+            let has_servers = row.iter().any(|c| !uploaded::servers(&self.uploaded, &c.path).is_empty());
+            let height = if has_servers { TILE_HEIGHT + SERVERS_LINE } else { TILE_HEIGHT };
+            let (row_rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
             for (i, clip) in row.iter().enumerate() {
                 let x = row_rect.left() + i as f32 * (tile_w + GAP);
-                let rect = Rect::from_min_size(pos2(x, row_rect.top()), vec2(tile_w, TILE_HEIGHT));
+                let rect = Rect::from_min_size(pos2(x, row_rect.top()), vec2(tile_w, height));
                 let analysis = analyses
                     .get(&clip.path)
                     .filter(|(modified, _)| *modified == clip.modified)
@@ -740,19 +832,21 @@ impl ClipsPage {
                     }
                     _ => PlayerView::default(),
                 };
-                let editing = self.renaming.as_mut().filter(|(p, _)| *p == clip.path).map(|(_, text)| text);
                 let menu_open = self.menu.as_deref() == Some(clip.path.as_path());
                 let custom_mix = !volumes::lookup(&self.volumes, &clip.path).is_default();
                 let uploaded = uploaded::is_marked(&self.uploaded, &clip.path);
-                let selected = self.selected.as_deref() == Some(clip.path.as_path());
-                if selected && std::mem::take(&mut self.scroll_to_selected) {
+                if self.selected.as_deref() == Some(clip.path.as_path()) && std::mem::take(&mut self.scroll_to_selected) {
                     ui.scroll_to_rect(rect.expand(GAP), None);
                 }
                 // Pressing anywhere on a card selects it (not through a
-                // dialog or menu on top of it).
+                // dialog or menu on top of it); Ctrl and Shift select
+                // several (#83).
+                let modifiers = ui.input(|i| i.modifiers);
                 if ui.input(|i| i.pointer.primary_pressed()) && ui.rect_contains_pointer(rect) {
-                    self.selected = Some(clip.path.clone());
+                    self.press_card(&clip.path, modifiers, clips);
                 }
+                let selected = self.is_picked(&clip.path);
+                let editing = self.renaming.as_mut().filter(|(p, _)| *p == clip.path).map(|(_, text)| text);
                 // Just pointed out (#50): fades from 1 to 0.
                 let highlight = match &self.highlight {
                     Some((p, at)) if *p == clip.path => {
@@ -762,9 +856,15 @@ impl ClipsPage {
                     _ => 0.0,
                 };
                 let soundboard = !self.soundboard_url.is_empty();
-                let card = Card { view, menu_open, custom_mix, uploaded, selected, highlight, soundboard };
+                let servers = uploaded::servers(&self.uploaded, &clip.path).iter().map(|s| s.name.clone()).collect();
+                let card = Card { view, menu_open, custom_mix, uploaded, servers, selected, highlight, soundboard };
                 if let Some(action) = tile(ui, rect, clip, analysis, card, editing, today) {
-                    self.act(action, clip);
+                    // A Ctrl or Shift click only selects: it doesn't also
+                    // play, seek or press a button on the card.
+                    let selecting = modifiers.command || modifiers.shift;
+                    if !selecting || matches!(action, Action::FinishRename | Action::CancelRename) {
+                        self.act(action, clip);
+                    }
                 }
             }
             ui.add_space(GAP);
@@ -834,7 +934,7 @@ impl ClipsPage {
                     "Delete",
                     ButtonKind::Danger,
                 );
-                self.confirm = Some((dialog, clip.clone(), Pending::Delete));
+                self.confirm = Some((dialog, vec![clip.clone()], Pending::Delete));
                 Ok(())
             }
             Action::SetUploaded(on) => {
@@ -867,7 +967,7 @@ impl ClipsPage {
                     "Make Discord-ready",
                     ButtonKind::Primary,
                 );
-                self.confirm = Some((dialog, clip.clone(), Pending::DiscordReady));
+                self.confirm = Some((dialog, vec![clip.clone()], Pending::DiscordReady));
                 Ok(())
             }
             Action::CancelRename => {
@@ -960,8 +1060,14 @@ impl ClipsPage {
         let path = dialog.clip().to_path_buf();
         self.upload = None;
         if let super::upload::Outcome::Uploaded(server) = outcome {
-            self.set_uploaded(&path, true);
-            self.toast = Some((format!("Uploaded to {server}'s soundboard."), Instant::now()));
+            let toast = format!("Uploaded to {}'s soundboard.", server.name);
+            // The mark and where it went (#84).
+            if let Err(e) = uploaded::add_server(&path, server) {
+                crate::log!("saving the uploaded mark of {} failed: {e:#}", path.display());
+            }
+            self.uploaded = uploaded::load();
+            crate::tray::post_library_changed(); // the tooltip's count (#48)
+            self.toast = Some((toast, Instant::now()));
         }
     }
 
@@ -989,10 +1095,18 @@ impl ClipsPage {
     fn show_confirm(&mut self, ctx: &egui::Context) {
         let Some((dialog, _, _)) = &self.confirm else { return };
         let Some(confirmed) = dialog.show(ctx) else { return };
-        let Some((_, clip, pending)) = self.confirm.take() else { return };
+        let Some((_, clips, pending)) = self.confirm.take() else { return };
         if !confirmed {
             return;
         }
+        if clips.len() > 1 {
+            match pending {
+                Pending::Delete => self.delete_many(&clips),
+                Pending::DiscordReady => self.discord_ready_many(&clips),
+            }
+            return;
+        }
+        let Some(clip) = clips.into_iter().next() else { return };
         if pending == Pending::Delete {
             self.delete(&clip);
             return;
@@ -1010,6 +1124,138 @@ impl ClipsPage {
             crate::log!("making {} Discord-ready failed: {e:#}", clip.path.display());
             self.toast = Some((format!("Couldn't make it Discord-ready: {e:#}"), Instant::now()));
         }
+    }
+
+    /// The bar at the bottom while several clips are selected (#83).
+    fn selection_bar(&mut self, ui: &mut Ui, selection: &[ClipFile]) {
+        let all_uploaded = selection.iter().all(|c| uploaded::is_marked(&self.uploaded, &c.path));
+        let screen = ui.ctx().content_rect();
+        let width = (screen.width() - super::SIDEBAR_WIDTH - 80.0).clamp(300.0, 760.0);
+        let mut clicked = None;
+        egui::Area::new(egui::Id::unique("clips-selection-bar"))
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_BOTTOM, vec2(super::SIDEBAR_WIDTH / 2.0, -20.0))
+            .show(ui.ctx(), |ui| {
+                ui.set_width(width);
+                Frame::new()
+                    .fill(pal().bg_floating)
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin { left: 16, right: 10, top: 10, bottom: 10 })
+                    .show(ui, |ui| {
+                        let w = ui.available_width();
+                        ui.allocate_ui_with_layout(vec2(w, 32.0), Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            if button(ui, "Delete", ButtonKind::Danger).clicked() {
+                                clicked = Some(0);
+                            }
+                            if button(ui, "Make Discord-ready", ButtonKind::Secondary).clicked() {
+                                clicked = Some(1);
+                            }
+                            let mark = if all_uploaded { "Mark as not uploaded" } else { "Mark as uploaded" };
+                            if button(ui, mark, ButtonKind::Secondary).clicked() {
+                                clicked = Some(2);
+                            }
+                            if button(ui, "Clear", ButtonKind::Secondary).on_hover_text("Clear the selection (Esc)").clicked() {
+                                clicked = Some(3);
+                            }
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                let msg = format!("{} clips selected", selection.len());
+                                text(ui, msg, 15.0, Weight::Semibold, pal().text_normal);
+                            });
+                        });
+                    });
+            });
+        match clicked {
+            Some(0) => self.ask_delete_many(selection.to_vec()),
+            Some(1) => self.ask_discord_ready_many(selection.to_vec()),
+            Some(2) => {
+                for c in selection {
+                    self.set_uploaded(&c.path, !all_uploaded);
+                }
+                let n = selection.len();
+                let msg = if all_uploaded { format!("Marked {n} clips as not uploaded.") } else { format!("Marked {n} clips as uploaded.") };
+                self.toast = Some((msg, Instant::now()));
+            }
+            Some(3) => match self.selected.clone() {
+                Some(p) => self.select_only(&p),
+                None => self.deselect(),
+            },
+            _ => {}
+        }
+    }
+
+    fn ask_delete_many(&mut self, clips: Vec<ClipFile>) {
+        let n = clips.len();
+        let dialog = super::confirm::ConfirmDialog::new(
+            format!("Delete {n} clips?"),
+            "They will be moved to the Recycle Bin.",
+            "Delete",
+            ButtonKind::Danger,
+        );
+        self.confirm = Some((dialog, clips, Pending::Delete));
+    }
+
+    fn delete_many(&mut self, clips: &[ClipFile]) {
+        for c in clips {
+            self.delete(c);
+        }
+        self.deselect();
+        self.toast = Some((format!("Moved {} clips to the Recycle Bin.", clips.len()), Instant::now()));
+    }
+
+    /// Asks before making the selected clips Discord-ready. Ones that already
+    /// are, and ones longer than 5 s (a part has to be picked in Edit), are
+    /// left out and named in the dialog.
+    fn ask_discord_ready_many(&mut self, clips: Vec<ClipFile>) {
+        let (mut todo, mut ready, mut long) = (Vec::new(), 0, 0);
+        for c in clips {
+            let analysis = self.analyses.lock().unwrap().get(&c.path).cloned();
+            let a = analysis.filter(|(m, _)| *m == c.modified).and_then(|(_, a)| a.ok());
+            let custom_mix = !volumes::lookup(&self.volumes, &c.path).is_default();
+            if a.as_ref().is_some_and(|a| library::is_discord_ready(&c, a.seconds, a.channels, custom_mix)) {
+                ready += 1;
+            } else if a.as_ref().is_some_and(|a| library::too_long_for_soundboard(a.seconds)) {
+                long += 1;
+            } else {
+                todo.push(c);
+            }
+        }
+        let skipped = skipped_note(ready, long);
+        if todo.is_empty() {
+            self.toast = Some((format!("Nothing to do: {}", skipped.trim_start()), Instant::now()));
+            return;
+        }
+        let dialog = super::confirm::ConfirmDialog::new(
+            format!("Make {} Discord-ready?", clips_word(todo.len())),
+            format!("Saves them as MP3s for the soundboard and replaces them. The originals go to the Recycle Bin.{skipped}"),
+            "Make Discord-ready",
+            ButtonKind::Primary,
+        );
+        // A single clip left takes the one-clip path once confirmed.
+        self.confirm = Some((dialog, todo, Pending::DiscordReady));
+    }
+
+    fn discord_ready_many(&mut self, clips: &[ClipFile]) {
+        let (mut done, mut long, mut failed) = (0, 0, 0);
+        for c in clips {
+            match self.make_discord_ready(&c.path) {
+                Ok(Some(_)) => done += 1,
+                Ok(None) => long += 1, // not analysed before: turned out too long
+                Err(e) => {
+                    crate::log!("making {} Discord-ready failed: {e:#}", c.path.display());
+                    failed += 1;
+                }
+            }
+        }
+        self.deselect();
+        let mut msg = format!("Made {} Discord-ready.", clips_word(done));
+        if long > 0 {
+            msg.push_str(&skipped_note(0, long));
+        }
+        if failed > 0 {
+            msg.push_str(&format!(" {failed} failed (see the log)."));
+        }
+        self.toast = Some((msg, Instant::now()));
     }
 
     /// Replaces the clip with its Discord-ready version (#25). Returns the
@@ -1107,7 +1353,7 @@ impl ClipsPage {
         let screen = ui.ctx().content_rect();
         egui::Area::new(egui::Id::unique("clips-toast"))
             .order(egui::Order::Foreground)
-            .anchor(Align2::CENTER_BOTTOM, vec2(110.0, -24.0))
+            .anchor(Align2::CENTER_BOTTOM, vec2(super::SIDEBAR_WIDTH / 2.0, if self.bar_shown { -84.0 } else { -24.0 }))
             .interactable(false)
             .show(ui.ctx(), |ui| {
                 ui.set_max_width(screen.width() - 280.0);
@@ -1177,6 +1423,8 @@ struct Card {
     custom_mix: bool,
     /// The clip is marked as uploaded (#28).
     uploaded: bool,
+    /// The servers the app uploaded it to (#84); empty when marked by hand.
+    servers: Vec<String>,
     /// Selected for the keyboard shortcuts (#47).
     selected: bool,
     /// Just pointed out (#50), fading from 1 to 0.
@@ -1195,7 +1443,7 @@ fn tile(
     editing: Option<&mut String>,
     today: i32,
 ) -> Option<Action> {
-    let Card { view, menu_open, custom_mix, uploaded, selected, highlight, soundboard } = card_state;
+    let Card { view, menu_open, custom_mix, uploaded, servers, selected, highlight, soundboard } = card_state;
     let id = ui.make_persistent_id(("clip", &clip.path));
     let card = ui.interact(rect, id, Sense::hover());
     let fill = if card.hovered() { mix(pal().bg_secondary, pal().bg_hover, 0.6) } else { pal().bg_secondary };
@@ -1355,7 +1603,14 @@ fn tile(
     if uploaded {
         detail.push_str(" · Uploaded");
     }
-    painter.text(pos2(inner.left(), title_y + 23.0), Align2::LEFT_TOP, detail, font(13.0, Weight::Regular), pal().text_muted);
+    one_line(ui, pos2(inner.left(), title_y + 23.0), inner.width(), detail, None);
+    // Where it was uploaded (#84), on a line of its own: the grid row is
+    // `SERVERS_LINE` taller for it. Cut with "…" when it doesn't fit, with
+    // the whole list on hover.
+    if !servers.is_empty() {
+        let line = servers_line(&servers);
+        one_line(ui, pos2(inner.left(), title_y + 23.0 + SERVERS_LINE), inner.width(), line.clone(), Some((id.with("servers"), line)));
+    }
 
     // Buttons.
     let buttons = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 30.0), inner.max);
@@ -1421,6 +1676,48 @@ fn more_button(ui: &mut Ui, open: bool) -> egui::Response {
         ui.painter().circle_filled(rect.center() + vec2(dx, 0.0), 2.0, pal().header_primary);
     }
     resp
+}
+
+/// "1 clip", "3 clips".
+fn clips_word(n: usize) -> String {
+    if n == 1 {
+        "1 clip".into()
+    } else {
+        format!("{n} clips")
+    }
+}
+
+/// Why some selected clips were left out of Make Discord-ready (#83), as
+/// sentences after a space; empty when none were.
+fn skipped_note(ready: usize, long: usize) -> String {
+    let mut s = String::new();
+    if ready > 0 {
+        let verb = if ready == 1 { "is" } else { "are" };
+        s.push_str(&format!(" {} {verb} already Discord-ready.", clips_word(ready)));
+    }
+    if long > 0 {
+        s.push_str(&format!(" Skipped {}: longer than 5 s, pick a part in Edit.", clips_word(long)));
+    }
+    s
+}
+
+/// The card line naming the servers a clip was uploaded to (#84).
+fn servers_line(servers: &[String]) -> String {
+    format!("Uploaded to {}", servers.join(", "))
+}
+
+/// A muted 13 px line of card text, ending in "…" when it's wider than
+/// `width`. A cut line shows `tip` (its id and text) on hover.
+fn one_line(ui: &Ui, at: egui::Pos2, width: f32, text: String, tip: Option<(egui::Id, String)>) {
+    let mut job = egui::text::LayoutJob::simple_singleline(text, font(13.0, Weight::Regular), pal().text_muted);
+    job.wrap = egui::text::TextWrapping { max_width: width, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let galley = ui.painter().layout_job(job);
+    let cut = galley.elided;
+    let rect = Rect::from_min_size(at, galley.size());
+    ui.painter().galley(at, galley, pal().text_muted);
+    if let Some((id, tip)) = tip.filter(|_| cut) {
+        ui.interact(rect, id, Sense::hover()).on_hover_text(tip);
+    }
 }
 
 /// The ⋯ menu, opening below its button like Discord's context menus.
@@ -1676,6 +1973,57 @@ pub(super) fn today() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selects_several_clips() {
+        use egui::Modifiers;
+        let clips: Vec<ClipFile> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|n| ClipFile { path: PathBuf::from(format!("{n}.wav")), size: 0, modified: SystemTime::UNIX_EPOCH, saved: None, name: None })
+            .collect();
+        let p = |n: &str| PathBuf::from(format!("{n}.wav"));
+        let names = |page: &ClipsPage| page.selection(&clips).iter().map(|c| c.path.clone()).collect::<Vec<_>>();
+        let mut page = ClipsPage::default();
+
+        page.press_card(&p("b"), Modifiers::NONE, &clips);
+        assert_eq!(names(&page), [p("b")]);
+        // Ctrl adds, Ctrl again removes.
+        page.press_card(&p("d"), Modifiers::COMMAND, &clips);
+        assert_eq!(names(&page), [p("b"), p("d")]);
+        page.press_card(&p("d"), Modifiers::COMMAND, &clips);
+        assert_eq!(names(&page), [p("b")]);
+        // Shift: the range from the last selected card, either way.
+        page.press_card(&p("e"), Modifiers::SHIFT, &clips);
+        assert_eq!(names(&page), [p("b"), p("c"), p("d"), p("e")]);
+        page.press_card(&p("a"), Modifiers::SHIFT, &clips);
+        assert_eq!(names(&page), [p("a"), p("b")]);
+        // Ctrl-removing the anchor moves it to another selected card.
+        page.press_card(&p("b"), Modifiers::COMMAND, &clips);
+        assert_eq!(names(&page), [p("a")]);
+        assert_eq!(page.selected, Some(p("a")));
+        // A plain click goes back to one card.
+        page.press_card(&p("c"), Modifiers::COMMAND, &clips);
+        page.press_card(&p("e"), Modifiers::NONE, &clips);
+        assert_eq!(names(&page), [p("e")]);
+        // Only visible clips count.
+        page.press_card(&p("a"), Modifiers::COMMAND, &clips);
+        assert_eq!(page.selection(&clips[..3]).len(), 1);
+    }
+
+    #[test]
+    fn ctrl_a_selects_all() {
+        let none = egui::Modifiers::NONE;
+        assert_eq!(shortcut_for(egui::Key::A, egui::Modifiers::COMMAND, false, 4), Some(Shortcut::SelectAll));
+        assert_eq!(shortcut_for(egui::Key::A, none, false, 4), None);
+        assert_eq!(skipped_note(0, 0), "");
+        assert_eq!(skipped_note(1, 2), " 1 clip is already Discord-ready. Skipped 2 clips: longer than 5 s, pick a part in Edit.");
+    }
+
+    #[test]
+    fn names_upload_servers() {
+        assert_eq!(servers_line(&["Soundboard testing".into()]), "Uploaded to Soundboard testing");
+        assert_eq!(servers_line(&["A".into(), "B".into()]), "Uploaded to A, B");
+    }
 
     #[test]
     fn filter_shows_by_uploaded_mark() {
