@@ -1361,22 +1361,25 @@ fn tile(
         }
         _ => {}
     }
-    // "· Uploaded (Server A, Server B)", or "(Server A +1)" with the whole
-    // list on hover when that doesn't fit (#84).
-    let mut full_list = None;
+    // "· Uploaded (Server A, Server B)", or "(Server A +1)" when that doesn't
+    // fit (#84). Whatever still doesn't fit ends in "…"; hovering a
+    // shortened line shows all the servers.
+    let fits = |d: &str| painter.layout_no_wrap(d.to_string(), font(13.0, Weight::Regular), pal().text_muted).size().x <= inner.width();
+    let mut shortened = false;
     if uploaded {
-        let fits = |d: &str| painter.layout_no_wrap(d.to_string(), font(13.0, Weight::Regular), pal().text_muted).size().x <= inner.width();
         let long = format!("{detail}{}", uploaded_text(&servers, false));
-        detail = if fits(&long) || servers.len() < 2 {
-            long
-        } else {
-            full_list = Some(servers.join(", "));
-            format!("{detail}{}", uploaded_text(&servers, true))
-        };
+        let short = format!("{detail}{}", uploaded_text(&servers, true));
+        shortened = !servers.is_empty() && !fits(&long);
+        detail = if shortened { short } else { long };
     }
-    let detail_rect = painter.text(pos2(inner.left(), title_y + 23.0), Align2::LEFT_TOP, detail, font(13.0, Weight::Regular), pal().text_muted);
-    if let Some(list) = full_list {
-        ui.interact(detail_rect, id.with("servers"), Sense::hover()).on_hover_text(format!("Uploaded to {list}"));
+    let mut job = egui::text::LayoutJob::simple_singleline(detail, font(13.0, Weight::Regular), pal().text_muted);
+    job.wrap = egui::text::TextWrapping { max_width: inner.width(), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let galley = painter.layout_job(job);
+    let detail_rect = Rect::from_min_size(pos2(inner.left(), title_y + 23.0), galley.size());
+    painter.galley(detail_rect.min, galley, pal().text_muted);
+    if shortened {
+        let tip = format!("Uploaded to {}", servers.join(", "));
+        ui.interact(detail_rect, id.with("servers"), Sense::hover()).on_hover_text(tip);
     }
 
     // Buttons.
