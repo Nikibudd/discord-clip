@@ -33,10 +33,14 @@ Every request sends `Authorization: Key <UPLOAD_KEY>` when a key is set.
 | --- | --- |
 | `GET /` | `{ ok, bot: { id, name } }` |
 | `GET /servers` | `{ servers: [{ id, name, icon, can_upload }] }`: all the bot's servers, in one Discord call. `can_upload` is false when the bot lacks **Create Expressions** there. The app hides servers the user isn't in by asking for each one's soundboard. |
-| `GET /servers/<server id>?user=<id>` | `{ id, name, icon, tier, used, total, sounds: [{ id, name, emoji, available }] }`. `total` is `null` when Discord gave the server extra slots it doesn't report. A user who isn't in the server gets `403 { error, not_member: true }`. |
+| `GET /servers/<server id>?user=<id>` | `{ id, name, icon, tier, used, total, sounds: [{ id, name, emoji, volume, available, by_bot }] }`. `total` is `null` when Discord gave the server extra slots it doesn't report. `by_bot` is true for sounds the bot added, the only ones it can change or delete. A user who isn't in the server gets `403 { error, not_member: true }`. |
 | `POST /invites` with `{ "links": "<pasted text>" }` | `{ servers: [{ id, name, icon, has_bot, install_url }], invalid: [codes] }`: at most 25 invite links at once. |
 | `POST /upload` with `{ user, guild, name, sound, emoji?, volume? }` | `201 { id, name }`. `sound` is `data:audio/mpeg;base64,…` (or `audio/ogg`), at most 512 KB and 5.2 s; `name` is 2–32 characters; `emoji` is a Unicode emoji or a custom emoji id; `volume` is 0–1. |
+| `PATCH /sounds/<server id>/<sound id>?user=<id>` with `{ name?, emoji?, volume? }` | `{ id, name, emoji, volume }`. Changes one of the bot's sounds; an empty `emoji` removes it. Same rules as `/upload`. |
+| `DELETE /sounds/<server id>/<sound id>?user=<id>` | `204`. Deletes one of the bot's sounds. |
 
-Errors come back as `{ error }` with a matching status code. When Discord refused, the answer also carries Discord's own reply as `discord`. The server's audit log names the uploader's user id.
+Errors come back as `{ error }` with a matching status code. When Discord refused, the answer also carries Discord's own reply as `discord`. The server's audit log names the user id of whoever uploaded, changed or deleted a sound. Sounds added by people (not the bot) can't be changed or deleted: Discord refuses with 403.
+
+**Updating:** after pulling a newer version, deploy again (`npx wrangler deploy` in this folder). The secrets stay.
 
 The bot is added with only the **Create Expressions** permission, so it can add sounds and change or delete its own, but not anyone else's.
