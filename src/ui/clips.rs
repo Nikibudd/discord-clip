@@ -762,7 +762,8 @@ impl ClipsPage {
                     _ => 0.0,
                 };
                 let soundboard = !self.soundboard_url.is_empty();
-                let card = Card { view, menu_open, custom_mix, uploaded, selected, highlight, soundboard };
+                let servers = uploaded::servers(&self.uploaded, &clip.path).iter().map(|s| s.name.clone()).collect();
+                let card = Card { view, menu_open, custom_mix, uploaded, servers, selected, highlight, soundboard };
                 if let Some(action) = tile(ui, rect, clip, analysis, card, editing, today) {
                     self.act(action, clip);
                 }
@@ -960,8 +961,14 @@ impl ClipsPage {
         let path = dialog.clip().to_path_buf();
         self.upload = None;
         if let super::upload::Outcome::Uploaded(server) = outcome {
-            self.set_uploaded(&path, true);
-            self.toast = Some((format!("Uploaded to {server}'s soundboard."), Instant::now()));
+            let toast = format!("Uploaded to {}'s soundboard.", server.name);
+            // The mark and where it went (#84).
+            if let Err(e) = uploaded::add_server(&path, server) {
+                crate::log!("saving the uploaded mark of {} failed: {e:#}", path.display());
+            }
+            self.uploaded = uploaded::load();
+            crate::tray::post_library_changed(); // the tooltip's count (#48)
+            self.toast = Some((toast, Instant::now()));
         }
     }
 
@@ -1177,6 +1184,8 @@ struct Card {
     custom_mix: bool,
     /// The clip is marked as uploaded (#28).
     uploaded: bool,
+    /// The servers the app uploaded it to (#84); empty when marked by hand.
+    servers: Vec<String>,
     /// Selected for the keyboard shortcuts (#47).
     selected: bool,
     /// Just pointed out (#50), fading from 1 to 0.
@@ -1195,7 +1204,7 @@ fn tile(
     editing: Option<&mut String>,
     today: i32,
 ) -> Option<Action> {
-    let Card { view, menu_open, custom_mix, uploaded, selected, highlight, soundboard } = card_state;
+    let Card { view, menu_open, custom_mix, uploaded, servers, selected, highlight, soundboard } = card_state;
     let id = ui.make_persistent_id(("clip", &clip.path));
     let card = ui.interact(rect, id, Sense::hover());
     let fill = if card.hovered() { mix(pal().bg_secondary, pal().bg_hover, 0.6) } else { pal().bg_secondary };
@@ -1352,10 +1361,23 @@ fn tile(
         }
         _ => {}
     }
+    // "· Uploaded (Server A, Server B)", or "(Server A +1)" with the whole
+    // list on hover when that doesn't fit (#84).
+    let mut full_list = None;
     if uploaded {
-        detail.push_str(" · Uploaded");
+        let fits = |d: &str| painter.layout_no_wrap(d.to_string(), font(13.0, Weight::Regular), pal().text_muted).size().x <= inner.width();
+        let long = format!("{detail}{}", uploaded_text(&servers, false));
+        detail = if fits(&long) || servers.len() < 2 {
+            long
+        } else {
+            full_list = Some(servers.join(", "));
+            format!("{detail}{}", uploaded_text(&servers, true))
+        };
     }
-    painter.text(pos2(inner.left(), title_y + 23.0), Align2::LEFT_TOP, detail, font(13.0, Weight::Regular), pal().text_muted);
+    let detail_rect = painter.text(pos2(inner.left(), title_y + 23.0), Align2::LEFT_TOP, detail, font(13.0, Weight::Regular), pal().text_muted);
+    if let Some(list) = full_list {
+        ui.interact(detail_rect, id.with("servers"), Sense::hover()).on_hover_text(format!("Uploaded to {list}"));
+    }
 
     // Buttons.
     let buttons = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 30.0), inner.max);
@@ -1421,6 +1443,16 @@ fn more_button(ui: &mut Ui, open: bool) -> egui::Response {
         ui.painter().circle_filled(rect.center() + vec2(dx, 0.0), 2.0, pal().header_primary);
     }
     resp
+}
+
+/// The end of a card's details for an uploaded clip (#84): " · Uploaded",
+/// " · Uploaded (A, B)", or `short` " · Uploaded (A +1)".
+fn uploaded_text(servers: &[String], short: bool) -> String {
+    match servers {
+        [] => " · Uploaded".into(),
+        [first, rest @ ..] if short && !rest.is_empty() => format!(" · Uploaded ({first} +{})", rest.len()),
+        all => format!(" · Uploaded ({})", all.join(", ")),
+    }
 }
 
 /// The ⋯ menu, opening below its button like Discord's context menus.
@@ -1676,6 +1708,16 @@ pub(super) fn today() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_upload_servers() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(uploaded_text(&[], false), " · Uploaded");
+        assert_eq!(uploaded_text(&s(&["Soundboard testing"]), false), " · Uploaded (Soundboard testing)");
+        assert_eq!(uploaded_text(&s(&["Soundboard testing"]), true), " · Uploaded (Soundboard testing)");
+        assert_eq!(uploaded_text(&s(&["A", "B", "C"]), false), " · Uploaded (A, B, C)");
+        assert_eq!(uploaded_text(&s(&["A", "B", "C"]), true), " · Uploaded (A +2)");
+    }
 
     #[test]
     fn filter_shows_by_uploaded_mark() {
