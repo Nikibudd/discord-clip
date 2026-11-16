@@ -232,6 +232,18 @@ pub fn default_name(file_stem: &str) -> String {
     name.chars().take(MAX_NAME).collect::<String>().trim_end().to_string()
 }
 
+impl Board {
+    /// The sound already called `name`, ignoring case and surrounding spaces
+    /// (#82). Only used for a warning: Discord allows duplicate names.
+    pub fn same_name(&self, name: &str) -> Option<&Sound> {
+        let name = name.trim().to_lowercase();
+        if name.is_empty() {
+            return None;
+        }
+        self.sounds.iter().find(|s| s.name.trim().to_lowercase() == name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +264,18 @@ mod tests {
         assert_eq!(default_name("discord_clip_20261113_211451"), "clip");
         assert_eq!(default_name("my sound"), "my sound");
         assert_eq!(default_name(&format!("discord_clip_1_2 {}", "a".repeat(40))).len(), 32);
+    }
+
+    #[test]
+    fn finds_same_names_loosely() {
+        let sound = |name: &str| Sound { name: name.into(), emoji: None, available: true };
+        let b = Board { used: 2, total: Some(8), sounds: vec![sound("AI ception"), sound(" Bruh ")] };
+        assert_eq!(b.same_name("ai CEPTION").map(|s| s.name.as_str()), Some("AI ception"));
+        assert_eq!(b.same_name("  AI ception  ").map(|s| s.name.as_str()), Some("AI ception"));
+        assert_eq!(b.same_name("bruh").map(|s| s.name.as_str()), Some(" Bruh "));
+        assert!(b.same_name("AI ceptio").is_none());
+        assert!(b.same_name("AIception").is_none());
+        assert!(b.same_name("   ").is_none());
     }
 
     #[test]

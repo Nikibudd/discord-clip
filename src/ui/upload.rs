@@ -112,6 +112,10 @@ impl UploadDialog {
                 section_label(ui, "Name");
                 let w = ui.available_width();
                 ui.add_enabled_ui(!busy, |ui| text_field(ui, &mut self.name, "Name of the sound", false, w));
+                if let Some(note) = self.duplicate_note() {
+                    ui.add_space(6.0);
+                    ui.add(egui::Label::new(egui::RichText::new(note).font(font(14.0, Weight::Regular)).color(pal().yellow)).wrap());
+                }
                 ui.add_space(16.0);
 
                 ui.horizontal(|ui| {
@@ -174,6 +178,17 @@ impl UploadDialog {
         } else {
             None
         }
+    }
+
+    /// A warning when the picked server already has a sound with this name
+    /// (#82). It never blocks the upload.
+    fn duplicate_note(&self) -> Option<String> {
+        let sel = self.selected.as_ref()?;
+        let l = self.loaded.lock().unwrap();
+        let e = l.entries.iter().find(|e| &e.server.id == sel)?;
+        let Some(Ok(Some(board))) = &e.board else { return None };
+        let sound = board.same_name(&self.name)?;
+        Some(format!("{} already has a sound called \u{201c}{}\u{201d}.", e.server.name, sound.name.trim()))
     }
 
     fn server_name(&self) -> Option<String> {
