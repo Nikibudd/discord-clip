@@ -475,16 +475,46 @@ fn slots_text(b: &Board) -> String {
 }
 
 /// The server's sounds as small chips: click to play (#81), right-click the
-/// bot's own to edit or delete them.
+/// bot's own to edit or delete them. The bot's sounds and people's are in
+/// two labelled groups, so it's clear which can be right-clicked; with no
+/// bot sounds there are no labels.
 fn sounds(ui: &mut Ui, server: &str, b: &Board, state: &ChipState) -> Option<Click> {
     if b.sounds.is_empty() {
         text(ui, "No sounds yet.", 14.0, Weight::Regular, pal().text_muted);
         return None;
     }
+    let (bot, people): (Vec<&Sound>, Vec<&Sound>) = b.sounds.iter().partition(|s| s.by_bot);
+    if bot.is_empty() {
+        return chips(ui, server, &people, state);
+    }
+    let mut click = None;
+    group_label(ui, "Added with Discord Clip", Some("right-click to edit or delete"));
+    click = chips(ui, server, &bot, state).or(click);
+    if !people.is_empty() {
+        ui.add_space(14.0);
+        group_label(ui, "Added in Discord", None);
+        click = chips(ui, server, &people, state).or(click);
+    }
+    click
+}
+
+/// A small heading above a group of sounds, with an optional hint.
+fn group_label(ui: &mut Ui, title: &str, hint: Option<&str>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        text(ui, title.to_uppercase(), 12.0, Weight::Bold, pal().header_secondary);
+        if let Some(h) = hint {
+            text(ui, format!("· {h}"), 12.0, Weight::Regular, pal().text_muted);
+        }
+    });
+    ui.add_space(8.0);
+}
+
+fn chips(ui: &mut Ui, server: &str, sounds: &[&Sound], state: &ChipState) -> Option<Click> {
     let mut click = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-        for s in &b.sounds {
+        for s in sounds {
             if let Some(c) = chip(ui, server, s, state) {
                 click = Some(c);
             }
