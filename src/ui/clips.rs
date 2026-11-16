@@ -29,6 +29,8 @@ use crate::volumes::{self, Volumes};
 const RESCAN_EVERY: Duration = Duration::from_secs(2);
 const TILE_MIN_WIDTH: f32 = 250.0;
 const TILE_HEIGHT: f32 = 186.0;
+/// The extra line on cards that name their upload servers (#84).
+const SERVERS_LINE: f32 = 18.0;
 const GAP: f32 = 16.0;
 
 type Analyses = Arc<Mutex<HashMap<PathBuf, (SystemTime, Result<Analysis, String>)>>>;
@@ -726,10 +728,13 @@ impl ClipsPage {
         let analyses = self.analyses.lock().unwrap().clone();
 
         for row in clips.chunks(cols) {
-            let (row_rect, _) = ui.allocate_exact_size(vec2(width, TILE_HEIGHT), Sense::hover());
+            // A row with a card naming its upload servers is a line taller (#84).
+            let has_servers = row.iter().any(|c| !uploaded::servers(&self.uploaded, &c.path).is_empty());
+            let height = if has_servers { TILE_HEIGHT + SERVERS_LINE } else { TILE_HEIGHT };
+            let (row_rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
             for (i, clip) in row.iter().enumerate() {
                 let x = row_rect.left() + i as f32 * (tile_w + GAP);
-                let rect = Rect::from_min_size(pos2(x, row_rect.top()), vec2(tile_w, TILE_HEIGHT));
+                let rect = Rect::from_min_size(pos2(x, row_rect.top()), vec2(tile_w, height));
                 let analysis = analyses
                     .get(&clip.path)
                     .filter(|(modified, _)| *modified == clip.modified)
@@ -1361,25 +1366,16 @@ fn tile(
         }
         _ => {}
     }
-    // "· Uploaded (Server A, Server B)", or "(Server A +1)" when that doesn't
-    // fit (#84). Whatever still doesn't fit ends in "…"; hovering a
-    // shortened line shows all the servers.
-    let fits = |d: &str| painter.layout_no_wrap(d.to_string(), font(13.0, Weight::Regular), pal().text_muted).size().x <= inner.width();
-    let mut shortened = false;
     if uploaded {
-        let long = format!("{detail}{}", uploaded_text(&servers, false));
-        let short = format!("{detail}{}", uploaded_text(&servers, true));
-        shortened = !servers.is_empty() && !fits(&long);
-        detail = if shortened { short } else { long };
+        detail.push_str(" · Uploaded");
     }
-    let mut job = egui::text::LayoutJob::simple_singleline(detail, font(13.0, Weight::Regular), pal().text_muted);
-    job.wrap = egui::text::TextWrapping { max_width: inner.width(), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    let galley = painter.layout_job(job);
-    let detail_rect = Rect::from_min_size(pos2(inner.left(), title_y + 23.0), galley.size());
-    painter.galley(detail_rect.min, galley, pal().text_muted);
-    if shortened {
-        let tip = format!("Uploaded to {}", servers.join(", "));
-        ui.interact(detail_rect, id.with("servers"), Sense::hover()).on_hover_text(tip);
+    one_line(ui, pos2(inner.left(), title_y + 23.0), inner.width(), detail, None);
+    // Where it was uploaded (#84), on a line of its own: the grid row is
+    // `SERVERS_LINE` taller for it. Cut with "…" when it doesn't fit, with
+    // the whole list on hover.
+    if !servers.is_empty() {
+        let line = servers_line(&servers);
+        one_line(ui, pos2(inner.left(), title_y + 23.0 + SERVERS_LINE), inner.width(), line.clone(), Some((id.with("servers"), line)));
     }
 
     // Buttons.
@@ -1448,13 +1444,22 @@ fn more_button(ui: &mut Ui, open: bool) -> egui::Response {
     resp
 }
 
-/// The end of a card's details for an uploaded clip (#84): " · Uploaded",
-/// " · Uploaded (A, B)", or `short` " · Uploaded (A +1)".
-fn uploaded_text(servers: &[String], short: bool) -> String {
-    match servers {
-        [] => " · Uploaded".into(),
-        [first, rest @ ..] if short && !rest.is_empty() => format!(" · Uploaded ({first} +{})", rest.len()),
-        all => format!(" · Uploaded ({})", all.join(", ")),
+/// The card line naming the servers a clip was uploaded to (#84).
+fn servers_line(servers: &[String]) -> String {
+    format!("Uploaded to {}", servers.join(", "))
+}
+
+/// A muted 13 px line of card text, ending in "…" when it's wider than
+/// `width`. A cut line shows `tip` (its id and text) on hover.
+fn one_line(ui: &Ui, at: egui::Pos2, width: f32, text: String, tip: Option<(egui::Id, String)>) {
+    let mut job = egui::text::LayoutJob::simple_singleline(text, font(13.0, Weight::Regular), pal().text_muted);
+    job.wrap = egui::text::TextWrapping { max_width: width, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let galley = ui.painter().layout_job(job);
+    let cut = galley.elided;
+    let rect = Rect::from_min_size(at, galley.size());
+    ui.painter().galley(at, galley, pal().text_muted);
+    if let Some((id, tip)) = tip.filter(|_| cut) {
+        ui.interact(rect, id, Sense::hover()).on_hover_text(tip);
     }
 }
 
@@ -1714,12 +1719,8 @@ mod tests {
 
     #[test]
     fn names_upload_servers() {
-        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        assert_eq!(uploaded_text(&[], false), " · Uploaded");
-        assert_eq!(uploaded_text(&s(&["Soundboard testing"]), false), " · Uploaded (Soundboard testing)");
-        assert_eq!(uploaded_text(&s(&["Soundboard testing"]), true), " · Uploaded (Soundboard testing)");
-        assert_eq!(uploaded_text(&s(&["A", "B", "C"]), false), " · Uploaded (A, B, C)");
-        assert_eq!(uploaded_text(&s(&["A", "B", "C"]), true), " · Uploaded (A +2)");
+        assert_eq!(servers_line(&["Soundboard testing".into()]), "Uploaded to Soundboard testing");
+        assert_eq!(servers_line(&["A".into(), "B".into()]), "Uploaded to A, B");
     }
 
     #[test]
