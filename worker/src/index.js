@@ -10,6 +10,8 @@
 //   GET  /servers/<id>?user=<id>   one server's soundboard, if the user is in it
 //   POST /invites                  invite links -> servers missing the bot
 //   POST /upload                   adds a sound
+//   PATCH  /sounds/<server>/<sound>?user=<id>   changes one of the bot's sounds
+//   DELETE /sounds/<server>/<sound>?user=<id>   deletes one of the bot's sounds
 //
 // The free plan allows 50 Discord calls per request, so every request makes
 // only a few.
@@ -55,6 +57,13 @@ export default {
       if (request.method === "POST" && path === "/upload") {
         return await upload(env, await body(request));
       }
+      const sound = path.match(/^\/sounds\/(\d{15,21})\/(\d{15,21})$/);
+      if (request.method === "PATCH" && sound) {
+        return await editSound(env, sound[1], sound[2], userParam(url), await body(request));
+      }
+      if (request.method === "DELETE" && sound) {
+        return await deleteSound(env, sound[1], sound[2], userParam(url));
+      }
       return json({ error: "Not found." }, 404);
     } catch (e) {
       if (e instanceof BadRequest) return json({ error: e.message, ...e.extra }, e.status);
@@ -96,6 +105,7 @@ async function server(env, guildId, user) {
   const tier = g.premium_tier || 0;
   // Servers with this feature get extra slots by an amount Discord doesn't say.
   const total = (g.features || []).includes("MORE_SOUNDBOARD") ? null : SLOTS[tier] ?? null;
+  const bot = botId(env);
   return json({
     id: g.id,
     name: g.name,
@@ -107,7 +117,11 @@ async function server(env, guildId, user) {
       id: s.sound_id,
       name: s.name,
       emoji: s.emoji_name || s.emoji_id || null,
+      volume: s.volume ?? 1,
       available: s.available !== false,
+      // Only these can be changed or deleted: the bot has Create
+      // Expressions, not Manage Expressions.
+      by_bot: !!bot && s.user?.id === bot,
     })),
   });
 }
@@ -157,10 +171,7 @@ async function upload(env, input) {
   if (!SNOWFLAKE.test(user)) throw new BadRequest("Missing or invalid user id.");
   if (!SNOWFLAKE.test(guild)) throw new BadRequest("Missing or invalid server id.");
 
-  const name = String(input.name ?? "").trim();
-  if ([...name].length < 2 || [...name].length > 32) {
-    throw new BadRequest("The name must be 2 to 32 characters.");
-  }
+  const name = checkName(input.name);
 
   const sound = String(input.sound ?? "");
   const m = sound.match(/^data:audio\/(mpeg|mp3|ogg);base64,([A-Za-z0-9+/]+=*)$/);
@@ -171,11 +182,7 @@ async function upload(env, input) {
   }
 
   const payload = { name, sound: `data:audio/${m[1] === "ogg" ? "ogg" : "mpeg"};base64,${m[2]}` };
-  if (input.volume !== undefined && input.volume !== null) {
-    const v = Number(input.volume);
-    if (!(v >= 0 && v <= 1)) throw new BadRequest("Volume must be between 0 and 1.");
-    payload.volume = v;
-  }
+  if (input.volume !== undefined && input.volume !== null) payload.volume = checkVolume(input.volume);
   const emoji = String(input.emoji ?? "").trim();
   if (emoji) {
     if (SNOWFLAKE.test(emoji)) payload.emoji_id = emoji;
@@ -191,6 +198,65 @@ async function upload(env, input) {
     `Uploaded by user ${user} with discord-clip`,
   );
   return json({ id: s.sound_id, name: s.name }, 201);
+}
+
+// Changes one of the bot's sounds. Body: { name?, emoji?, volume? }; an empty
+// emoji removes it. Discord refuses sounds the bot didn't add.
+async function editSound(env, guild, soundId, user, input) {
+  const payload = {};
+  if (input.name !== undefined) payload.name = checkName(input.name);
+  if (input.volume !== undefined && input.volume !== null) payload.volume = checkVolume(input.volume);
+  if (input.emoji !== undefined) {
+    const emoji = String(input.emoji ?? "").trim();
+    Object.assign(payload, emoji ? emojiFields(emoji) : { emoji_id: null, emoji_name: null });
+  }
+  if (Object.keys(payload).length === 0) throw new BadRequest("Nothing to change.");
+  await requireMember(env, guild, user);
+  const s = await discord(
+    env,
+    "PATCH",
+    `/guilds/${guild}/soundboard-sounds/${soundId}`,
+    payload,
+    `Changed by user ${user} with discord-clip`,
+  );
+  return json({
+    id: s.sound_id,
+    name: s.name,
+    emoji: s.emoji_name || s.emoji_id || null,
+    volume: s.volume ?? 1,
+  });
+}
+
+// Deletes one of the bot's sounds.
+async function deleteSound(env, guild, soundId, user) {
+  await requireMember(env, guild, user);
+  await discord(
+    env,
+    "DELETE",
+    `/guilds/${guild}/soundboard-sounds/${soundId}`,
+    undefined,
+    `Deleted by user ${user} with discord-clip`,
+  );
+  return new Response(null, { status: 204 });
+}
+
+function checkName(value) {
+  const name = String(value ?? "").trim();
+  if ([...name].length < 2 || [...name].length > 32) {
+    throw new BadRequest("The name must be 2 to 32 characters.");
+  }
+  return name;
+}
+
+function checkVolume(value) {
+  const v = Number(value);
+  if (!(v >= 0 && v <= 1)) throw new BadRequest("Volume must be between 0 and 1.");
+  return v;
+}
+
+// A Unicode emoji or a custom emoji's id.
+function emojiFields(emoji) {
+  return SNOWFLAKE.test(emoji) ? { emoji_id: emoji, emoji_name: null } : { emoji_id: null, emoji_name: emoji };
 }
 
 // --- Discord lookups -------------------------------------------------------
@@ -220,6 +286,18 @@ async function isMember(env, guildId, user) {
 async function requireMember(env, guildId, user) {
   if (!(await isMember(env, guildId, user))) {
     throw new BadRequest("You're not in that server, or the bot isn't.", 403, { not_member: true });
+  }
+}
+
+// The bot's user id, read from its token (the token's first part is the id in
+// base64), so it costs no Discord call.
+function botId(env) {
+  try {
+    const part = env.DISCORD_BOT_TOKEN.split(".")[0].replace(/-/g, "+").replace(/_/g, "/");
+    const id = atob(part + "=".repeat((4 - (part.length % 4)) % 4));
+    return SNOWFLAKE.test(id) ? id : null;
+  } catch {
+    return null;
   }
 }
 
