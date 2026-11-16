@@ -18,6 +18,7 @@ mod emoji_picker;
 mod follow;
 mod keybind;
 mod settings;
+mod sound_edit;
 mod soundboards;
 mod upload;
 mod avatars;
@@ -335,6 +336,7 @@ impl ClipWindow {
     fn hide(&mut self) {
         self.settings.keybind.stop(None);
         self.clips.on_hide();
+        self.soundboards.on_hide();
         if let Some(hwnd) = window_hwnd() {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
@@ -414,6 +416,10 @@ impl eframe::App for ClipWindow {
             .show_separator_line(false)
             .frame(Frame::new().fill(fill(pal().bg_secondary)))
             .show(ui, |ui| sidebar::show(ui, &mut self.page, &snap, &self.icons));
+        // Leaving the Soundboards page stops its sound (#81).
+        if self.page != Page::Soundboards {
+            self.soundboards.on_hide();
+        }
 
         egui::CentralPanel::default().frame(Frame::new().fill(fill(pal().bg_primary))).show(ui, |ui| {
             if snap.restart_needed {

@@ -42,15 +42,38 @@ pub struct Board {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Sound {
+    /// Empty from a Worker older than #81.
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     pub emoji: Option<String>,
+    /// 0..=1.
+    #[serde(default = "one")]
+    pub volume: f32,
     /// False when the server lost the boosts for this slot.
     #[serde(default = "yes")]
     pub available: bool,
+    /// Added by the group's bot, so it can change or delete it (#81). Always
+    /// false from a Worker older than #81.
+    #[serde(default)]
+    pub by_bot: bool,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+/// What changing a sound changes (#81); `None` leaves it as it is. An empty
+/// emoji removes it.
+#[derive(Debug, Default)]
+pub struct SoundEdit {
+    pub name: Option<String>,
+    pub emoji: Option<String>,
+    pub volume: Option<f32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -138,6 +161,26 @@ impl Service {
             "sound": format!("data:{mime};base64,{}", base64(&bytes)),
         });
         self.call("POST", "/upload", Some(body)).map(|_| ())
+    }
+
+    /// Changes one of the bot's sounds (#81).
+    pub fn edit_sound(&self, server: &str, sound: &str, user: &str, edit: &SoundEdit) -> Result<()> {
+        let mut body = serde_json::Map::new();
+        if let Some(n) = &edit.name {
+            body.insert("name".into(), json!(n.trim()));
+        }
+        if let Some(e) = &edit.emoji {
+            body.insert("emoji".into(), json!(e.trim()));
+        }
+        if let Some(v) = edit.volume {
+            body.insert("volume".into(), json!(v.clamp(0.0, 1.0)));
+        }
+        self.call("PATCH", &format!("/sounds/{server}/{sound}?user={user}"), Some(Value::Object(body))).map(|_| ())
+    }
+
+    /// Deletes one of the bot's sounds (#81).
+    pub fn delete_sound(&self, server: &str, sound: &str, user: &str) -> Result<()> {
+        self.call("DELETE", &format!("/sounds/{server}/{sound}?user={user}"), None).map(|_| ())
     }
 
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
@@ -232,6 +275,34 @@ pub fn default_name(file_stem: &str) -> String {
     name.chars().take(MAX_NAME).collect::<String>().trim_end().to_string()
 }
 
+/// Downloads a soundboard sound from Discord's CDN (sounds are public) into a
+/// temporary folder, once, and returns the file (#81). The extension follows
+/// the content: Discord keeps MP3 and Ogg sounds.
+pub fn fetch_sound(id: &str) -> Result<std::path::PathBuf> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+        bail!("this sound has no id; update the soundboard service (redeploy the Worker)");
+    }
+    let dir = std::env::temp_dir().join("discord-clip-sounds");
+    for ext in ["mp3", "ogg"] {
+        let p = dir.join(format!("{id}.{ext}"));
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    let r = crate::http::request("GET", &format!("https://cdn.discordapp.com/soundboard-sounds/{id}"), &[], None, 2 * MAX_BYTES as usize)
+        .context("couldn't reach Discord")?;
+    if r.status != 200 {
+        bail!("Discord answered HTTP {} for this sound", r.status);
+    }
+    let ext = if r.body.starts_with(b"OggS") { "ogg" } else { "mp3" };
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{id}.{ext}"));
+    let tmp = dir.join(format!("{id}.tmp"));
+    std::fs::write(&tmp, &r.body)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
 impl Board {
     /// The sound already called `name`, ignoring case and surrounding spaces
     /// (#82). Only used for a warning: Discord allows duplicate names.
@@ -259,6 +330,29 @@ mod tests {
     }
 
     #[test]
+    fn reads_sounds_old_and_new() {
+        // A Worker from before #81: no id, volume or by_bot.
+        let old: Sound = serde_json::from_value(json!({ "name": "a", "emoji": null })).unwrap();
+        assert_eq!((old.id.as_str(), old.volume, old.by_bot, old.available), ("", 1.0, false, true));
+        let new: Sound =
+            serde_json::from_value(json!({ "id": "123", "name": "a", "emoji": "🤖", "volume": 0.5, "by_bot": true })).unwrap();
+        assert_eq!((new.id.as_str(), new.volume, new.by_bot), ("123", 0.5, true));
+    }
+
+    /// Downloads real sounds from Discord's CDN and decodes them: one the
+    /// bot uploaded (MP3 from the app) and one a person added in Discord.
+    #[test]
+    #[ignore]
+    fn live_fetches_and_decodes_sounds() {
+        for id in ["1571576358625345536", "1569822572294574112", "1570180160811044924"] {
+            let path = fetch_sound(id).unwrap();
+            let audio = crate::audio::read(&path);
+            println!("{id}: {} -> {:?}", path.display(), audio.as_ref().map(|a| (a.channels, a.rate, a.seconds())).map_err(|e| format!("{e:#}")));
+            audio.unwrap();
+        }
+    }
+
+    #[test]
     fn names_from_files() {
         assert_eq!(default_name("discord_clip_20261113_211451 AI ception"), "AI ception");
         assert_eq!(default_name("discord_clip_20261113_211451"), "clip");
@@ -268,7 +362,7 @@ mod tests {
 
     #[test]
     fn finds_same_names_loosely() {
-        let sound = |name: &str| Sound { name: name.into(), emoji: None, available: true };
+        let sound = |name: &str| Sound { id: String::new(), name: name.into(), emoji: None, volume: 1.0, available: true, by_bot: false };
         let b = Board { used: 2, total: Some(8), sounds: vec![sound("AI ception"), sound(" Bruh ")] };
         assert_eq!(b.same_name("ai CEPTION").map(|s| s.name.as_str()), Some("AI ception"));
         assert_eq!(b.same_name("  AI ception  ").map(|s| s.name.as_str()), Some("AI ception"));
