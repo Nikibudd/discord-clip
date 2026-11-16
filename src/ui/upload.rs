@@ -15,8 +15,8 @@ use crate::soundboard::{Board, Server, Service, Upload, MAX_NAME, MIN_NAME};
 /// How the dialog ended.
 pub enum Outcome {
     Cancelled,
-    /// Uploaded to the server with this name.
-    Uploaded(String),
+    /// Uploaded to this server.
+    Uploaded(crate::uploaded::Server),
 }
 
 /// One server in the list. `board`: `None` while loading, `Ok(None)` when
@@ -82,8 +82,9 @@ impl UploadDialog {
             self.sending = None;
             match done {
                 Ok(()) => {
+                    let id = self.selected.clone().unwrap_or_default();
                     let name = self.server_name().unwrap_or_default();
-                    return Some(Outcome::Uploaded(name));
+                    return Some(Outcome::Uploaded(crate::uploaded::Server { id, name }));
                 }
                 Err(e) => self.error = Some(e),
             }

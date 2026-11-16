@@ -29,6 +29,8 @@ use crate::volumes::{self, Volumes};
 const RESCAN_EVERY: Duration = Duration::from_secs(2);
 const TILE_MIN_WIDTH: f32 = 250.0;
 const TILE_HEIGHT: f32 = 186.0;
+/// The extra line on cards that name their upload servers (#84).
+const SERVERS_LINE: f32 = 18.0;
 const GAP: f32 = 16.0;
 
 type Analyses = Arc<Mutex<HashMap<PathBuf, (SystemTime, Result<Analysis, String>)>>>;
@@ -726,10 +728,13 @@ impl ClipsPage {
         let analyses = self.analyses.lock().unwrap().clone();
 
         for row in clips.chunks(cols) {
-            let (row_rect, _) = ui.allocate_exact_size(vec2(width, TILE_HEIGHT), Sense::hover());
+            // A row with a card naming its upload servers is a line taller (#84).
+            let has_servers = row.iter().any(|c| !uploaded::servers(&self.uploaded, &c.path).is_empty());
+            let height = if has_servers { TILE_HEIGHT + SERVERS_LINE } else { TILE_HEIGHT };
+            let (row_rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
             for (i, clip) in row.iter().enumerate() {
                 let x = row_rect.left() + i as f32 * (tile_w + GAP);
-                let rect = Rect::from_min_size(pos2(x, row_rect.top()), vec2(tile_w, TILE_HEIGHT));
+                let rect = Rect::from_min_size(pos2(x, row_rect.top()), vec2(tile_w, height));
                 let analysis = analyses
                     .get(&clip.path)
                     .filter(|(modified, _)| *modified == clip.modified)
@@ -762,7 +767,8 @@ impl ClipsPage {
                     _ => 0.0,
                 };
                 let soundboard = !self.soundboard_url.is_empty();
-                let card = Card { view, menu_open, custom_mix, uploaded, selected, highlight, soundboard };
+                let servers = uploaded::servers(&self.uploaded, &clip.path).iter().map(|s| s.name.clone()).collect();
+                let card = Card { view, menu_open, custom_mix, uploaded, servers, selected, highlight, soundboard };
                 if let Some(action) = tile(ui, rect, clip, analysis, card, editing, today) {
                     self.act(action, clip);
                 }
@@ -960,8 +966,14 @@ impl ClipsPage {
         let path = dialog.clip().to_path_buf();
         self.upload = None;
         if let super::upload::Outcome::Uploaded(server) = outcome {
-            self.set_uploaded(&path, true);
-            self.toast = Some((format!("Uploaded to {server}'s soundboard."), Instant::now()));
+            let toast = format!("Uploaded to {}'s soundboard.", server.name);
+            // The mark and where it went (#84).
+            if let Err(e) = uploaded::add_server(&path, server) {
+                crate::log!("saving the uploaded mark of {} failed: {e:#}", path.display());
+            }
+            self.uploaded = uploaded::load();
+            crate::tray::post_library_changed(); // the tooltip's count (#48)
+            self.toast = Some((toast, Instant::now()));
         }
     }
 
@@ -1177,6 +1189,8 @@ struct Card {
     custom_mix: bool,
     /// The clip is marked as uploaded (#28).
     uploaded: bool,
+    /// The servers the app uploaded it to (#84); empty when marked by hand.
+    servers: Vec<String>,
     /// Selected for the keyboard shortcuts (#47).
     selected: bool,
     /// Just pointed out (#50), fading from 1 to 0.
@@ -1195,7 +1209,7 @@ fn tile(
     editing: Option<&mut String>,
     today: i32,
 ) -> Option<Action> {
-    let Card { view, menu_open, custom_mix, uploaded, selected, highlight, soundboard } = card_state;
+    let Card { view, menu_open, custom_mix, uploaded, servers, selected, highlight, soundboard } = card_state;
     let id = ui.make_persistent_id(("clip", &clip.path));
     let card = ui.interact(rect, id, Sense::hover());
     let fill = if card.hovered() { mix(pal().bg_secondary, pal().bg_hover, 0.6) } else { pal().bg_secondary };
@@ -1355,7 +1369,14 @@ fn tile(
     if uploaded {
         detail.push_str(" · Uploaded");
     }
-    painter.text(pos2(inner.left(), title_y + 23.0), Align2::LEFT_TOP, detail, font(13.0, Weight::Regular), pal().text_muted);
+    one_line(ui, pos2(inner.left(), title_y + 23.0), inner.width(), detail, None);
+    // Where it was uploaded (#84), on a line of its own: the grid row is
+    // `SERVERS_LINE` taller for it. Cut with "…" when it doesn't fit, with
+    // the whole list on hover.
+    if !servers.is_empty() {
+        let line = servers_line(&servers);
+        one_line(ui, pos2(inner.left(), title_y + 23.0 + SERVERS_LINE), inner.width(), line.clone(), Some((id.with("servers"), line)));
+    }
 
     // Buttons.
     let buttons = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 30.0), inner.max);
@@ -1421,6 +1442,25 @@ fn more_button(ui: &mut Ui, open: bool) -> egui::Response {
         ui.painter().circle_filled(rect.center() + vec2(dx, 0.0), 2.0, pal().header_primary);
     }
     resp
+}
+
+/// The card line naming the servers a clip was uploaded to (#84).
+fn servers_line(servers: &[String]) -> String {
+    format!("Uploaded to {}", servers.join(", "))
+}
+
+/// A muted 13 px line of card text, ending in "…" when it's wider than
+/// `width`. A cut line shows `tip` (its id and text) on hover.
+fn one_line(ui: &Ui, at: egui::Pos2, width: f32, text: String, tip: Option<(egui::Id, String)>) {
+    let mut job = egui::text::LayoutJob::simple_singleline(text, font(13.0, Weight::Regular), pal().text_muted);
+    job.wrap = egui::text::TextWrapping { max_width: width, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let galley = ui.painter().layout_job(job);
+    let cut = galley.elided;
+    let rect = Rect::from_min_size(at, galley.size());
+    ui.painter().galley(at, galley, pal().text_muted);
+    if let Some((id, tip)) = tip.filter(|_| cut) {
+        ui.interact(rect, id, Sense::hover()).on_hover_text(tip);
+    }
 }
 
 /// The ⋯ menu, opening below its button like Discord's context menus.
@@ -1676,6 +1716,12 @@ pub(super) fn today() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_upload_servers() {
+        assert_eq!(servers_line(&["Soundboard testing".into()]), "Uploaded to Soundboard testing");
+        assert_eq!(servers_line(&["A".into(), "B".into()]), "Uploaded to A, B");
+    }
 
     #[test]
     fn filter_shows_by_uploaded_mark() {
