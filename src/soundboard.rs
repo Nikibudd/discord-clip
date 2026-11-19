@@ -142,7 +142,9 @@ impl Service {
         Ok(serde_json::from_value(v).context("reading the invite answer")?)
     }
 
-    pub fn upload(&self, u: &Upload) -> Result<()> {
+    /// Uploads a clip; returns the new sound's id (empty from an old Worker
+    /// that doesn't say).
+    pub fn upload(&self, u: &Upload) -> Result<String> {
         let bytes = std::fs::read(u.file).with_context(|| format!("reading {}", u.file.display()))?;
         if bytes.len() as u64 > MAX_BYTES {
             bail!("the clip is larger than Discord's 512 KB limit");
@@ -160,7 +162,8 @@ impl Service {
             "volume": u.volume.clamp(0.0, 1.0),
             "sound": format!("data:{mime};base64,{}", base64(&bytes)),
         });
-        self.call("POST", "/upload", Some(body)).map(|_| ())
+        let v = self.call("POST", "/upload", Some(body))?;
+        Ok(v["id"].as_str().unwrap_or_default().to_string())
     }
 
     /// Changes one of the bot's sounds (#81).
@@ -303,6 +306,64 @@ pub fn fetch_sound(id: &str) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
+/// When a Discord id (a snowflake) was made, in local time: for a sound,
+/// when it was added to the server (#91).
+pub fn snowflake_time(id: &str) -> Option<crate::library::SavedAt> {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+
+    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+    const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+    let ms = (id.parse::<u64>().ok()? >> 22).checked_add(DISCORD_EPOCH_MS)?;
+    let ticks = ms.checked_mul(10_000)?.checked_add(FILETIME_UNIX_EPOCH)?;
+    let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+    let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+    unsafe {
+        FileTimeToSystemTime(&ft, &mut utc).ok()?;
+        SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).ok()?;
+    }
+    Some(crate::library::SavedAt {
+        year: local.wYear,
+        month: local.wMonth as u8,
+        day: local.wDay as u8,
+        hour: local.wHour as u8,
+        minute: local.wMinute as u8,
+        second: local.wSecond as u8,
+    })
+}
+
+/// Saves a server's soundboard sound into the clips folder as a normal clip
+/// (#91): `discord_clip_<when it was added> <name>`, in the format Discord
+/// serves it (MP3 or Ogg Opus), or converted to `format` when the app can't
+/// read that one. The clip is marked as uploaded to `server`, remembering
+/// the sound so it isn't saved twice. Returns the new clip.
+pub fn save_to_clips(sound: &Sound, server: &crate::uploaded::Server, dir: &Path, format: crate::audio::Format) -> Result<std::path::PathBuf> {
+    let src = fetch_sound(&sound.id)?;
+    let at = snowflake_time(&sound.id).unwrap_or_else(crate::library::SavedAt::now);
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let name = sound.name.trim();
+    let path = if crate::audio::read(&src).is_ok() {
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("mp3");
+        let path = crate::library::new_clip_path(dir, at, name, ext);
+        std::fs::copy(&src, &path).with_context(|| format!("copying the sound to {}", path.display()))?;
+        path
+    } else {
+        // e.g. Ogg Vorbis: only Opus is read as Ogg.
+        let mut audio = crate::audio::read_any(&src).context("the app can't read this sound's format")?;
+        if format == crate::audio::Format::Opus {
+            audio = crate::audio::resample(&audio, 48_000); // Opus is always 48 kHz
+        }
+        let path = crate::library::new_clip_path(dir, at, name, format.extension());
+        crate::audio::write(&path, &audio, format)?;
+        path
+    };
+    let mark = crate::uploaded::Server { sound: sound.id.clone(), ..server.clone() };
+    if let Err(e) = crate::uploaded::add_server(&path, mark) {
+        crate::log!("marking saved sound {} as uploaded failed: {e:#}", sound.id);
+    }
+    Ok(path)
+}
+
 impl Board {
     /// The sound already called `name`, ignoring case and surrounding spaces
     /// (#82). Only used for a warning: Discord allows duplicate names.
@@ -350,6 +411,33 @@ mod tests {
             println!("{id}: {} -> {:?}", path.display(), audio.as_ref().map(|a| (a.channels, a.rate, a.seconds())).map_err(|e| format!("{e:#}")));
             audio.unwrap();
         }
+    }
+
+    #[test]
+    fn reads_when_sounds_were_added() {
+        // Discord's docs example: 2016-04-30 11:18:25.796 UTC, shown in local time.
+        let at = snowflake_time("175928847299117063").unwrap();
+        assert_eq!(at.year, 2016);
+        // Time zones shift by whole quarter hours.
+        assert_eq!((at.minute % 15, at.second), (18 % 15, 25), "{at:?}");
+        assert!(snowflake_time("").is_none());
+        assert!(snowflake_time("abc").is_none());
+    }
+
+    /// Saves a real sound a person added in Discord (Ogg Opus) into a
+    /// temporary clips folder. (Its uploaded mark goes into the real store
+    /// and is dropped there on the next write, as the clip is gone.)
+    #[test]
+    #[ignore]
+    fn live_saves_a_sound_to_clips() {
+        let dir = std::env::temp_dir().join(format!("discord-clip-save-{}", std::process::id()));
+        let sound = Sound { id: "1569822572294574112".into(), name: "test: sound".into(), emoji: None, volume: 1.0, available: true, by_bot: false };
+        let server = crate::uploaded::Server { id: "1".into(), name: "Test".into(), sound: String::new() };
+        let path = save_to_clips(&sound, &server, &dir, crate::audio::Format::Wav).unwrap();
+        println!("{}", path.display());
+        assert!(path.file_name().unwrap().to_string_lossy().ends_with(" test sound.ogg"));
+        crate::audio::read(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

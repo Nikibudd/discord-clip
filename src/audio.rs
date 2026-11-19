@@ -131,6 +131,31 @@ impl Audio {
     }
 }
 
+/// `audio` at another sample rate, by linear interpolation: good enough for
+/// a short sound converted once (#91), e.g. 44.1 kHz Vorbis into Opus,
+/// which needs 48 kHz.
+pub fn resample(audio: &Audio, rate: u32) -> Audio {
+    let ch = audio.channels.max(1) as usize;
+    let frames = audio.frames();
+    if audio.rate == rate || frames == 0 || audio.rate == 0 {
+        return Audio { rate, ..audio.clone() };
+    }
+    let out_frames = (frames as u64 * rate as u64 / audio.rate as u64) as usize;
+    let step = audio.rate as f64 / rate as f64;
+    let mut samples = Vec::with_capacity(out_frames * ch);
+    for i in 0..out_frames {
+        let pos = i as f64 * step;
+        let a = (pos as usize).min(frames - 1);
+        let b = (a + 1).min(frames - 1);
+        let t = (pos - a as f64) as f32;
+        for c in 0..ch {
+            let (x, y) = (audio.samples[a * ch + c], audio.samples[b * ch + c]);
+            samples.push(x + (y - x) * t);
+        }
+    }
+    Audio { samples, channels: audio.channels, rate }
+}
+
 /// Reads a whole clip, whatever its format (by extension).
 pub fn read(path: &Path) -> Result<Audio> {
     let ctx = || format!("reading {}", path.display());
@@ -389,6 +414,18 @@ fn read_flac(path: &Path) -> Result<Audio> {
 // ---------------------------------------------------------------------------
 
 fn read_mp3(path: &Path) -> Result<Audio> {
+    read_symphonia(path, Some("mp3"), "MP3")
+}
+
+/// Reads any audio file `symphonia` knows (MP3, and Ogg Vorbis for
+/// soundboard sounds, #91), whatever its extension. For files `read` can't
+/// open, to convert them.
+pub fn read_any(path: &Path) -> Result<Audio> {
+    read_symphonia(path, None, "audio").with_context(|| format!("reading {}", path.display()))
+}
+
+/// Decodes with `symphonia`; `what` names the kind of file in errors.
+fn read_symphonia(path: &Path, extension: Option<&str>, what: &str) -> Result<Audio> {
     use symphonia::core::codecs::audio::AudioDecoderOptions;
     use symphonia::core::formats::probe::Hint;
     use symphonia::core::formats::TrackType;
@@ -397,15 +434,17 @@ fn read_mp3(path: &Path) -> Result<Audio> {
     let file = Box::new(std::fs::File::open(path)?);
     let stream = MediaSourceStream::new(file, Default::default());
     let mut hint = Hint::new();
-    hint.with_extension("mp3");
+    if let Some(ext) = extension {
+        hint.with_extension(ext);
+    }
     let mut format = symphonia::default::get_probe()
         .probe(&hint, stream, Default::default(), Default::default())
-        .map_err(|e| anyhow::anyhow!("not a readable MP3 file ({e})"))?;
+        .map_err(|e| anyhow::anyhow!("not a readable {what} file ({e})"))?;
     let track = format.default_track(TrackType::Audio).context("no audio in the file")?;
     let params = track.codec_params.as_ref().and_then(|p| p.audio()).context("no audio in the file")?;
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(params, &AudioDecoderOptions::default())
-        .map_err(|e| anyhow::anyhow!("can't decode this MP3 ({e})"))?;
+        .map_err(|e| anyhow::anyhow!("can't decode this {what} ({e})"))?;
     let track_id = track.id;
 
     let mut samples = Vec::new();
@@ -508,6 +547,18 @@ fn write_mp3(path: &Path, audio: &Audio, kbps: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resamples_linearly() {
+        let a = Audio { samples: vec![0.0, 1.0, 0.5, -1.0], channels: 2, rate: 24_000 };
+        let up = resample(&a, 48_000);
+        assert_eq!((up.rate, up.channels, up.frames()), (48_000, 2, 4));
+        assert_eq!(up.samples, vec![0.0, 1.0, 0.25, 0.0, 0.5, -1.0, 0.5, -1.0]);
+        let same = resample(&a, 24_000);
+        assert_eq!(same, a);
+        let cd = Audio { samples: vec![0.0; 44_100], channels: 1, rate: 44_100 };
+        assert_eq!(resample(&cd, 48_000).frames(), 48_000);
+    }
 
     fn test_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("discord-clip-audio-{name}-{}", std::process::id()));
