@@ -190,6 +190,16 @@ pub fn open_clip(snapshot: Snapshot, clip: PathBuf) {
     open_page(snapshot, Page::Clips);
 }
 
+/// Window thread: switches to the Clips page, scrolled to `clip` and
+/// highlighting it (#91: a soundboard sound just saved to Clips).
+fn show_clip(clip: PathBuf) {
+    *shared().focus_clip.lock().unwrap() = Some(clip);
+    *shared().requested_page.lock().unwrap() = Some(Page::Clips);
+    if let Some(ctx) = shared().ctx.lock().unwrap().as_ref() {
+        ctx.request_repaint();
+    }
+}
+
 /// Tray thread: shows the window, creating it the first time. Closing the
 /// window only hides it (winit can't create a second event loop).
 pub fn open(snapshot: Snapshot) {

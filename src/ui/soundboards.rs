@@ -3,11 +3,12 @@
 //! from invite links. Only shown once a soundboard service is set up.
 //!
 //! Clicking a sound plays it (#81); right-clicking one the bot added opens a
-//! menu to edit or delete it.
+//! menu to edit or delete it, and one added in Discord a menu to save it to
+//! the clips folder (#91).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, CornerRadius, CursorIcon, Frame, Layout, Margin, Pos2, Sense, Ui};
 
@@ -34,6 +35,35 @@ enum Click {
     Menu(SoundRef, Pos2),
 }
 
+/// A sound's right-click menu.
+#[derive(Clone)]
+struct Menu {
+    sound: SoundRef,
+    at: Pos2,
+    /// The bot's sound: Edit and Delete. Otherwise Save to Clips (#91).
+    by_bot: bool,
+    /// The clip it was saved to before (lowercase, see `uploaded::key`).
+    saved: Option<PathBuf>,
+}
+
+/// What was picked in a sound's menu.
+enum MenuAction {
+    Edit,
+    Delete,
+    Save,
+    Show(PathBuf),
+}
+
+/// A message at the bottom of the page, with the clip it's about.
+struct Toast {
+    text: String,
+    clip: Option<PathBuf>,
+    at: Instant,
+}
+
+/// How long a toast stays.
+const TOAST_SECS: f32 = 5.0;
+
 #[derive(Default)]
 pub struct SoundboardsPage {
     /// The servers and their soundboards; `None` = load them.
@@ -46,12 +76,15 @@ pub struct SoundboardsPage {
     playing: Option<(String, Playback)>,
     /// A sound being downloaded to play.
     fetching: Option<(String, Pending<PathBuf>)>,
-    /// The right-click menu of one of the bot's sounds, and where it opened.
-    menu: Option<(SoundRef, Pos2)>,
+    /// The open right-click menu.
+    menu: Option<Menu>,
     edit: Option<SoundDialog>,
     /// Asking before deleting this sound (its name for the dialog).
     confirm: Option<(SoundRef, ConfirmDialog)>,
     deleting: Option<(SoundRef, Pending<()>)>,
+    /// A sound being saved to the clips folder (#91), and its name.
+    saving: Option<(SoundRef, String, Pending<PathBuf>)>,
+    toast: Option<Toast>,
     /// The last error, shown above the servers.
     error: Option<String>,
 }
@@ -113,20 +146,23 @@ impl SoundboardsPage {
             status_line(ui, Some(pal().red), e, pal().red);
             ui.add_space(12.0);
         }
+        let busy = (self.deleting.as_ref().map(|(r, _)| (r.sound.clone(), "Deleting…")))
+            .or(self.saving.as_ref().map(|(r, _, _)| (r.sound.clone(), "Saving to Clips…")));
         let state = ChipState {
             playing: self.playing.as_ref().map(|(id, _)| id.clone()).or(self.fetching.as_ref().map(|(id, _)| id.clone())),
-            busy: self.deleting.as_ref().map(|(r, _)| r.sound.clone()),
+            busy,
         };
         let click = servers(ui, &loaded.lock().unwrap(), &state);
         // The open menu first: a click outside closes it before anything new
         // opens (a menu opened this frame mustn't see its own click).
-        self.show_menu(ui, &loaded);
+        self.show_menu(ui, &loaded, cfg);
         match click {
             Some(Click::Play(id)) => self.toggle_play(ui.ctx(), id),
-            Some(Click::Menu(r, at)) => self.menu = Some((r, at)),
+            Some(Click::Menu(r, at)) => self.open_menu(&loaded, r, at),
             None => {}
         }
         self.show_dialogs(ui.ctx(), &service, &loaded);
+        self.show_toast(ui);
 
         divider(ui);
         // The form keeps the reading width; the cards above use the window.
@@ -181,6 +217,34 @@ impl SoundboardsPage {
                 }
             }
         }
+        if let Some((r, name, pending)) = &self.saving {
+            let done = pending.lock().unwrap().take();
+            if let Some(result) = done {
+                let (id, name) = (r.sound.clone(), name.clone());
+                self.saving = None;
+                match result {
+                    Ok(clip) => {
+                        let text = format!("Saved \u{201c}{name}\u{201d} to Clips.");
+                        self.toast = Some(Toast { text, clip: Some(clip), at: Instant::now() });
+                        self.error = None;
+                    }
+                    Err(e) => {
+                        crate::log!("saving soundboard sound {id} failed: {e}");
+                        self.error = Some(format!("Couldn't save the sound to Clips: {e}"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Opens a sound's right-click menu. For a sound added in Discord, checks
+    /// whether it was saved to Clips before (#91).
+    fn open_menu(&mut self, loaded: &Arc<Mutex<Loaded>>, sound: SoundRef, at: Pos2) {
+        let by_bot = board_mut(&mut loaded.lock().unwrap(), &sound.server)
+            .and_then(|b| b.sounds.iter().find(|s| s.id == sound.sound).map(|s| s.by_bot))
+            .unwrap_or(false);
+        let saved = if by_bot { None } else { crate::uploaded::clip_of_sound(&crate::uploaded::load(), &sound.sound) };
+        self.menu = Some(Menu { sound, at, by_bot, saved });
     }
 
     /// Plays a sound, or stops it when it's the one playing. Starting one
@@ -195,9 +259,16 @@ impl SoundboardsPage {
         self.fetching = Some((id, spawn_call(ctx, move || crate::soundboard::fetch_sound(&fetch_id))));
     }
 
-    /// The right-click menu of one of the bot's sounds: Edit, Delete.
-    fn show_menu(&mut self, ui: &Ui, loaded: &Arc<Mutex<Loaded>>) {
-        let Some((r, at)) = self.menu.clone() else { return };
+    /// A sound's right-click menu: Edit and Delete for the bot's sounds; Save
+    /// to Clips for others, or showing the clip when it's saved already.
+    fn show_menu(&mut self, ui: &Ui, loaded: &Arc<Mutex<Loaded>>, cfg: &crate::config::Config) {
+        let Some(menu) = self.menu.clone() else { return };
+        let Menu { sound: r, at, by_bot, saved } = menu;
+        let items: Vec<(&str, bool, MenuAction)> = match (by_bot, saved) {
+            (true, _) => vec![("Edit sound…", false, MenuAction::Edit), ("Delete sound", true, MenuAction::Delete)],
+            (false, Some(clip)) => vec![("Already in Clips: show it", false, MenuAction::Show(clip))],
+            (false, None) => vec![("Save to Clips", false, MenuAction::Save)],
+        };
         let mut picked = None;
         let area = egui::Area::new(egui::Id::unique("sound-menu"))
             .order(egui::Order::Foreground)
@@ -208,9 +279,9 @@ impl SoundboardsPage {
                     .corner_radius(CornerRadius::same(4))
                     .inner_margin(Margin::same(6))
                     .show(ui, |ui| {
-                        ui.set_width(160.0);
+                        ui.set_width(if by_bot { 160.0 } else { 200.0 });
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        for (label, danger) in [("Edit sound…", false), ("Delete sound", true)] {
+                        for (label, danger, action) in items {
                             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
                             if resp.hovered() {
                                 ui.painter().rect_filled(rect, CornerRadius::same(3), if danger { RED_BTN } else { BLURPLE });
@@ -222,7 +293,7 @@ impl SoundboardsPage {
                             };
                             ui.painter().text(pos2(rect.left() + 10.0, rect.center().y), Align2::LEFT_CENTER, label, font(14.0, Weight::Semibold), color);
                             if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
-                                picked = Some(danger);
+                                picked = Some(action);
                             }
                         }
                     });
@@ -238,8 +309,20 @@ impl SoundboardsPage {
         let Some(Ok(Some(board))) = &entry.board else { return };
         let Some(sound) = board.sounds.iter().find(|s| s.id == r.sound) else { return };
         match picked {
-            Some(false) => self.edit = Some(SoundDialog::open(&r.server, &entry.server.name, sound)),
-            Some(true) => {
+            Some(MenuAction::Edit) => self.edit = Some(SoundDialog::open(&r.server, &entry.server.name, sound)),
+            Some(MenuAction::Save) => {
+                if self.saving.is_some() {
+                    self.error = Some("Wait for the sound being saved first.".into());
+                    return;
+                }
+                let server = crate::uploaded::Server { id: r.server.clone(), name: entry.server.name.clone(), sound: String::new() };
+                let (sound, dir, format) = (sound.clone(), cfg.out_dir.clone(), cfg.format);
+                let name = sound.name.trim().to_string();
+                let pending = spawn_call(ui.ctx(), move || crate::soundboard::save_to_clips(&sound, &server, &dir, format));
+                self.saving = Some((r, name, pending));
+            }
+            Some(MenuAction::Show(clip)) => show_in_clips(&clip),
+            Some(MenuAction::Delete) => {
                 let dialog = ConfirmDialog::new(
                     format!("Delete \u{201c}{}\u{201d}?", sound.name.trim()),
                     format!("It's removed from {}'s soundboard for everyone. This can't be undone.", entry.server.name),
@@ -286,6 +369,46 @@ impl SoundboardsPage {
                 }
                 Some(false) => self.confirm = None,
                 None => {}
+            }
+        }
+    }
+
+    /// The toast at the bottom, like the Clips page's, with a button to show
+    /// the clip it's about.
+    fn show_toast(&mut self, ui: &mut Ui) {
+        let Some(toast) = &self.toast else { return };
+        let age = toast.at.elapsed().as_secs_f32();
+        if age > TOAST_SECS {
+            self.toast = None;
+            return;
+        }
+        ui.ctx().request_repaint_after(Duration::from_millis(100));
+        let alpha = ((TOAST_SECS - age) / 0.3).clamp(0.0, 1.0);
+        let screen = ui.ctx().content_rect();
+        let mut show = false;
+        egui::Area::new(egui::Id::unique("soundboards-toast"))
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_BOTTOM, vec2(super::SIDEBAR_WIDTH / 2.0, -24.0))
+            .show(ui.ctx(), |ui| {
+                ui.set_max_width(screen.width() - 280.0);
+                ui.multiply_opacity(alpha);
+                Frame::new()
+                    .fill(pal().bg_floating)
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::symmetric(14, 8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 12.0;
+                            text(ui, toast.text.as_str(), 14.0, Weight::Semibold, pal().text_normal);
+                            if toast.clip.is_some() && button(ui, "Show", ButtonKind::Primary).clicked() {
+                                show = true;
+                            }
+                        });
+                    });
+            });
+        if show {
+            if let Some(clip) = self.toast.take().and_then(|t| t.clip) {
+                show_in_clips(&clip);
             }
         }
     }
@@ -374,10 +497,25 @@ impl SoundboardsPage {
 }
 
 /// What the sound chips show: the sound playing (or loading to play), and
-/// one being deleted.
+/// one being deleted or saved, with what's happening to it.
 struct ChipState {
     playing: Option<String>,
-    busy: Option<String>,
+    busy: Option<(String, &'static str)>,
+}
+
+/// Opens the Clips page on a clip and highlights it (#91), like clicking the
+/// "Clip saved" notification (#50). `clip` may be lowercase (from
+/// `uploaded`): the page needs the path as the folder listing spells it.
+fn show_in_clips(clip: &std::path::Path) {
+    let key = crate::uploaded::key(clip);
+    let found = clip
+        .parent()
+        .map(crate::library::scan)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|c| crate::uploaded::key(&c.path) == key)
+        .map(|c| c.path);
+    super::show_clip(found.unwrap_or_else(|| clip.to_path_buf()));
 }
 
 /// One server's soundboard in `l`, to change after an edit or delete.
@@ -475,9 +613,9 @@ fn slots_text(b: &Board) -> String {
 }
 
 /// The server's sounds as small chips: click to play (#81), right-click the
-/// bot's own to edit or delete them. The bot's sounds and people's are in
-/// two labelled groups, so it's clear which can be right-clicked; with no
-/// bot sounds there are no labels.
+/// bot's own to edit or delete them, and others to save them to Clips (#91).
+/// The bot's sounds and people's are in two labelled groups, so it's clear
+/// what right-clicking does; with no bot sounds there's just a hint.
 fn sounds(ui: &mut Ui, server: &str, b: &Board, state: &ChipState) -> Option<Click> {
     if b.sounds.is_empty() {
         text(ui, "No sounds yet.", 14.0, Weight::Regular, pal().text_muted);
@@ -485,6 +623,8 @@ fn sounds(ui: &mut Ui, server: &str, b: &Board, state: &ChipState) -> Option<Cli
     }
     let (bot, people): (Vec<&Sound>, Vec<&Sound>) = b.sounds.iter().partition(|s| s.by_bot);
     if bot.is_empty() {
+        text(ui, "Right-click a sound to save it to Clips.", 12.0, Weight::Regular, pal().text_muted);
+        ui.add_space(8.0);
         return chips(ui, server, &people, state);
     }
     let mut click = None;
@@ -492,7 +632,7 @@ fn sounds(ui: &mut Ui, server: &str, b: &Board, state: &ChipState) -> Option<Cli
     click = chips(ui, server, &bot, state).or(click);
     if !people.is_empty() {
         ui.add_space(14.0);
-        group_label(ui, "Added in Discord", None);
+        group_label(ui, "Added in Discord", Some("right-click to save to Clips"));
         click = chips(ui, server, &people, state).or(click);
     }
     click
@@ -525,7 +665,8 @@ fn chips(ui: &mut Ui, server: &str, sounds: &[&Sound], state: &ChipState) -> Opt
 
 fn chip(ui: &mut Ui, server: &str, s: &Sound, state: &ChipState) -> Option<Click> {
     let playing = state.playing.as_deref() == Some(s.id.as_str()) && !s.id.is_empty();
-    let busy = state.busy.as_deref() == Some(s.id.as_str()) && !s.id.is_empty();
+    let busy_with = state.busy.as_ref().filter(|(id, _)| *id == s.id && !s.id.is_empty()).map(|(_, what)| *what);
+    let busy = busy_with.is_some();
     let label = match &s.emoji {
         Some(e) if !e.chars().all(|c| c.is_ascii_digit()) => format!("{e} {}", s.name),
         _ => s.name.clone(),
@@ -552,13 +693,11 @@ fn chip(ui: &mut Ui, server: &str, s: &Sound, state: &ChipState) -> Option<Click
     ui.painter().rect_filled(rect, CornerRadius::same(12), fill);
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     let mut tip = Vec::new();
-    if busy {
-        tip.push("Deleting…");
+    if let Some(what) = busy_with {
+        tip.push(what);
     } else if can_play {
         tip.push(if playing { "Click to stop" } else { "Click to play" });
-        if s.by_bot {
-            tip.push("Right-click to edit or delete");
-        }
+        tip.push(if s.by_bot { "Right-click to edit or delete" } else { "Right-click to save to Clips" });
     }
     if !s.available {
         tip.push("Turned off: the server lost the boost for this slot");
@@ -568,7 +707,7 @@ fn chip(ui: &mut Ui, server: &str, s: &Sound, state: &ChipState) -> Option<Click
     if resp.clicked() {
         return Some(Click::Play(s.id.clone()));
     }
-    if resp.secondary_clicked() && s.by_bot && !busy {
+    if resp.secondary_clicked() && can_play {
         let at = resp.interact_pointer_pos().unwrap_or(rect.left_bottom());
         return Some(Click::Menu(SoundRef { server: server.into(), sound: s.id.clone() }, at));
     }

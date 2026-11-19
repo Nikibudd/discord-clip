@@ -7,6 +7,9 @@
 //! a tab after the path, then its servers as `id=name` entries separated by
 //! commas. Lines without a tab are marks made by hand. Entries of clips that
 //! no longer exist are dropped whenever the file is written.
+//!
+//! A clip saved from a server's soundboard (#91) also knows which sound it
+//! came from: that entry is `id=name=sound id`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,6 +22,9 @@ use anyhow::{Context, Result};
 pub struct Server {
     pub id: String,
     pub name: String,
+    /// The soundboard sound the clip was saved from (#91); empty when that's
+    /// not known (e.g. uploaded from the app).
+    pub sound: String,
 }
 
 /// Marked clips, by `key()` of their path, with the servers the app uploaded
@@ -58,6 +64,17 @@ pub fn add_server(path: &Path, server: Server) -> Result<()> {
     add_server_in(&store_path(), path, server)
 }
 
+/// The clip saved from this soundboard sound (#91), if it still exists. The
+/// path is lowercase (see `key`): compare it with `key` of other paths.
+pub fn clip_of_sound(set: &Set, sound: &str) -> Option<PathBuf> {
+    if sound.is_empty() {
+        return None;
+    }
+    set.iter()
+        .find(|(path, servers)| servers.iter().any(|s| s.sound == sound) && Path::new(path.as_str()).exists())
+        .map(|(path, _)| PathBuf::from(path))
+}
+
 /// The clip was renamed or replaced by a new file: its mark follows it.
 pub fn rename(from: &Path, to: &Path) -> Result<()> {
     rename_in(&store_path(), from, to)
@@ -77,8 +94,10 @@ fn parse_line(line: &str) -> Option<(String, Vec<Server>)> {
     let servers = servers
         .split(',')
         .filter_map(|entry| {
-            let (id, name) = entry.trim().split_once('=')?;
-            Some(Server { id: id.trim().to_string(), name: unescape(name) })
+            let mut parts = entry.trim().splitn(3, '=');
+            let (id, name) = (parts.next()?, parts.next()?);
+            let sound = parts.next().map(unescape).unwrap_or_default();
+            Some(Server { id: id.trim().to_string(), name: unescape(name), sound })
         })
         .filter(|s| !s.id.is_empty())
         .collect();
@@ -89,7 +108,13 @@ fn format_line(path: &str, servers: &[Server]) -> String {
     if servers.is_empty() {
         return format!("{path}\n");
     }
-    let list: Vec<String> = servers.iter().map(|s| format!("{}={}", escape(&s.id), escape(&s.name))).collect();
+    let list: Vec<String> = servers
+        .iter()
+        .map(|s| match s.sound.as_str() {
+            "" => format!("{}={}", escape(&s.id), escape(&s.name)),
+            sound => format!("{}={}={}", escape(&s.id), escape(&s.name), escape(sound)),
+        })
+        .collect();
     format!("{path}\t{}\n", list.join(","))
 }
 
@@ -159,7 +184,13 @@ fn add_server_in(store: &Path, path: &Path, server: Server) -> Result<()> {
     modify(store, |s| {
         let servers = s.entry(key(path)).or_default();
         match servers.iter_mut().find(|s| s.id == server.id) {
-            Some(known) => known.name = server.name, // uploaded again: the newer name
+            Some(known) => {
+                // Uploaded again: the newer name, keeping a known sound.
+                known.name = server.name;
+                if !server.sound.is_empty() {
+                    known.sound = server.sound;
+                }
+            }
             None => servers.push(server),
         }
     })
@@ -187,7 +218,28 @@ mod tests {
     }
 
     fn server(id: &str, name: &str) -> Server {
-        Server { id: id.into(), name: name.into() }
+        Server { id: id.into(), name: name.into(), sound: String::new() }
+    }
+
+    #[test]
+    fn remembers_the_sound_a_clip_came_from() {
+        let dir = temp_dir("uploaded-sounds");
+        let store = dir.join("clip-uploaded.txt");
+        let a = dir.join("Saved.ogg");
+        std::fs::write(&a, b"x").unwrap();
+        let saved = Server { id: "1".into(), name: "Big=Server".into(), sound: "123".into() };
+        add_server_in(&store, &a, saved.clone()).unwrap();
+        // Uploading it again from the app doesn't forget the sound.
+        add_server_in(&store, &a, server("1", "Big=Server")).unwrap();
+        let s = load_from(&store);
+        assert_eq!(servers(&s, &a), [saved]);
+        assert_eq!(clip_of_sound(&s, "123"), Some(PathBuf::from(key(&a))));
+        assert_eq!(clip_of_sound(&s, "456"), None);
+        assert_eq!(clip_of_sound(&s, ""), None);
+        // A deleted clip doesn't count, even before the file is written again.
+        std::fs::remove_file(&a).unwrap();
+        assert_eq!(clip_of_sound(&s, "123"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

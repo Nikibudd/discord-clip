@@ -84,7 +84,7 @@ impl UploadDialog {
                 Ok(()) => {
                     let id = self.selected.clone().unwrap_or_default();
                     let name = self.server_name().unwrap_or_default();
-                    return Some(Outcome::Uploaded(crate::uploaded::Server { id, name }));
+                    return Some(Outcome::Uploaded(crate::uploaded::Server { id, name, sound: String::new() }));
                 }
                 Err(e) => self.error = Some(e),
             }
