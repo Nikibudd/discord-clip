@@ -223,6 +223,25 @@ pub fn rename(path: &Path, name: &str) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// A free path for a new clip saved at `at` and called `name`:
+/// `discord_clip_<stamp> <name>.<ext>` in `dir`, with " (2)" etc. when a
+/// clip has that name already.
+pub fn new_clip_path(dir: &Path, at: SavedAt, name: &str, ext: &str) -> PathBuf {
+    let stamp = format!(
+        "{PREFIX}{:04}{:02}{:02}_{:02}{:02}{:02}",
+        at.year, at.month, at.day, at.hour, at.minute, at.second
+    );
+    let name = sanitize_name(name);
+    let stem = if name.is_empty() { stamp } else { format!("{stamp} {name}") };
+    let mut path = dir.join(format!("{stem}.{ext}"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}).{ext}"));
+        n += 1;
+    }
+    path
+}
+
 /// Reads a clip's length and its waveform for a card. Takes ~10 ms for a 30 s clip.
 pub fn analyze(path: &Path) -> Result<Analysis> {
     analyze_bars(path, WAVEFORM_BARS)
@@ -737,6 +756,20 @@ mod tests {
         std::fs::write(&other, b"z").unwrap();
         assert!(rename(&other, "").is_err());
         assert_eq!(rename(&other, "Renamed").unwrap().file_name().unwrap(), "Renamed.wav");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn names_new_clips() {
+        let dir = std::env::temp_dir().join(format!("discord-clip-new-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = SavedAt { year: 2026, month: 3, day: 7, hour: 9, minute: 5, second: 1 };
+        let a = new_clip_path(&dir, at, "Bruh? moment", "ogg");
+        assert_eq!(a.file_name().unwrap(), "discord_clip_20260307_090501 Bruh moment.ogg");
+        assert_eq!(split_clip_name(&a.file_stem().unwrap().to_string_lossy()), (Some(at), Some("Bruh moment".into())));
+        std::fs::write(&a, b"x").unwrap();
+        assert_eq!(new_clip_path(&dir, at, "Bruh moment", "ogg").file_name().unwrap(), "discord_clip_20260307_090501 Bruh moment (2).ogg");
+        assert_eq!(new_clip_path(&dir, at, " ", "mp3").file_name().unwrap(), "discord_clip_20260307_090501.mp3");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

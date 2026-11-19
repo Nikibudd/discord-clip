@@ -48,7 +48,8 @@ pub struct UploadDialog {
     selected: Option<String>,
     loaded: Arc<Mutex<Loaded>>,
     /// Set while uploading; holds the answer once it's there.
-    sending: Option<Arc<Mutex<Option<Result<(), String>>>>>,
+    /// The upload in progress; gives the new sound's id.
+    sending: Option<Arc<Mutex<Option<Result<String, String>>>>>,
     error: Option<String>,
 }
 
@@ -81,10 +82,11 @@ impl UploadDialog {
         if let Some(done) = self.sending.as_ref().and_then(|s| s.lock().unwrap().take()) {
             self.sending = None;
             match done {
-                Ok(()) => {
+                Ok(sound) => {
                     let id = self.selected.clone().unwrap_or_default();
                     let name = self.server_name().unwrap_or_default();
-                    return Some(Outcome::Uploaded(crate::uploaded::Server { id, name }));
+                    // The sound id lets the Soundboards page tell it's in Clips (#91).
+                    return Some(Outcome::Uploaded(crate::uploaded::Server { id, name, sound }));
                 }
                 Err(e) => self.error = Some(e),
             }
