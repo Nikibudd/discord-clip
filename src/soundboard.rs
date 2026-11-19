@@ -142,7 +142,9 @@ impl Service {
         Ok(serde_json::from_value(v).context("reading the invite answer")?)
     }
 
-    pub fn upload(&self, u: &Upload) -> Result<()> {
+    /// Uploads a clip; returns the new sound's id (empty from an old Worker
+    /// that doesn't say).
+    pub fn upload(&self, u: &Upload) -> Result<String> {
         let bytes = std::fs::read(u.file).with_context(|| format!("reading {}", u.file.display()))?;
         if bytes.len() as u64 > MAX_BYTES {
             bail!("the clip is larger than Discord's 512 KB limit");
@@ -160,7 +162,8 @@ impl Service {
             "volume": u.volume.clamp(0.0, 1.0),
             "sound": format!("data:{mime};base64,{}", base64(&bytes)),
         });
-        self.call("POST", "/upload", Some(body)).map(|_| ())
+        let v = self.call("POST", "/upload", Some(body))?;
+        Ok(v["id"].as_str().unwrap_or_default().to_string())
     }
 
     /// Changes one of the bot's sounds (#81).

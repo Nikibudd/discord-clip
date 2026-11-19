@@ -2,9 +2,9 @@
 //! bot, with their free slots and sounds, and adding the bot to more servers
 //! from invite links. Only shown once a soundboard service is set up.
 //!
-//! Clicking a sound plays it (#81); right-clicking one the bot added opens a
-//! menu to edit or delete it, and one added in Discord a menu to save it to
-//! the clips folder (#91).
+//! Clicking a sound plays it (#81); right-clicking one opens a menu to save
+//! it to the clips folder (#91), and for the bot's sounds to edit or delete
+//! it.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -40,7 +40,7 @@ enum Click {
 struct Menu {
     sound: SoundRef,
     at: Pos2,
-    /// The bot's sound: Edit and Delete. Otherwise Save to Clips (#91).
+    /// The bot's sound: also Edit and Delete.
     by_bot: bool,
     /// The clip it was saved to before (lowercase, see `uploaded::key`).
     saved: Option<PathBuf>,
@@ -237,13 +237,13 @@ impl SoundboardsPage {
         }
     }
 
-    /// Opens a sound's right-click menu. For a sound added in Discord, checks
-    /// whether it was saved to Clips before (#91).
+    /// Opens a sound's right-click menu, checking whether the sound is in
+    /// Clips already (#91): saved from here, or uploaded from this PC.
     fn open_menu(&mut self, loaded: &Arc<Mutex<Loaded>>, sound: SoundRef, at: Pos2) {
         let by_bot = board_mut(&mut loaded.lock().unwrap(), &sound.server)
             .and_then(|b| b.sounds.iter().find(|s| s.id == sound.sound).map(|s| s.by_bot))
             .unwrap_or(false);
-        let saved = if by_bot { None } else { crate::uploaded::clip_of_sound(&crate::uploaded::load(), &sound.sound) };
+        let saved = crate::uploaded::clip_of_sound(&crate::uploaded::load(), &sound.sound);
         self.menu = Some(Menu { sound, at, by_bot, saved });
     }
 
@@ -259,16 +259,19 @@ impl SoundboardsPage {
         self.fetching = Some((id, spawn_call(ctx, move || crate::soundboard::fetch_sound(&fetch_id))));
     }
 
-    /// A sound's right-click menu: Edit and Delete for the bot's sounds; Save
-    /// to Clips for others, or showing the clip when it's saved already.
+    /// A sound's right-click menu: Save to Clips, or showing the clip when
+    /// it's there already; for the bot's sounds also Edit and Delete.
     fn show_menu(&mut self, ui: &Ui, loaded: &Arc<Mutex<Loaded>>, cfg: &crate::config::Config) {
         let Some(menu) = self.menu.clone() else { return };
         let Menu { sound: r, at, by_bot, saved } = menu;
-        let items: Vec<(&str, bool, MenuAction)> = match (by_bot, saved) {
-            (true, _) => vec![("Edit sound…", false, MenuAction::Edit), ("Delete sound", true, MenuAction::Delete)],
-            (false, Some(clip)) => vec![("Already in Clips: show it", false, MenuAction::Show(clip))],
-            (false, None) => vec![("Save to Clips", false, MenuAction::Save)],
-        };
+        let mut items: Vec<(&str, bool, MenuAction)> = vec![match saved {
+            Some(clip) => ("Already in Clips: show it", false, MenuAction::Show(clip)),
+            None => ("Save to Clips", false, MenuAction::Save),
+        }];
+        if by_bot {
+            items.push(("Edit sound…", false, MenuAction::Edit));
+            items.push(("Delete sound", true, MenuAction::Delete));
+        }
         let mut picked = None;
         let area = egui::Area::new(egui::Id::unique("sound-menu"))
             .order(egui::Order::Foreground)
@@ -279,7 +282,7 @@ impl SoundboardsPage {
                     .corner_radius(CornerRadius::same(4))
                     .inner_margin(Margin::same(6))
                     .show(ui, |ui| {
-                        ui.set_width(if by_bot { 160.0 } else { 200.0 });
+                        ui.set_width(200.0);
                         ui.spacing_mut().item_spacing.y = 2.0;
                         for (label, danger, action) in items {
                             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
@@ -612,8 +615,8 @@ fn slots_text(b: &Board) -> String {
     }
 }
 
-/// The server's sounds as small chips: click to play (#81), right-click the
-/// bot's own to edit or delete them, and others to save them to Clips (#91).
+/// The server's sounds as small chips: click to play (#81), right-click to
+/// save them to Clips (#91) and, for the bot's own, to edit or delete them.
 /// The bot's sounds and people's are in two labelled groups, so it's clear
 /// what right-clicking does; with no bot sounds there's just a hint.
 fn sounds(ui: &mut Ui, server: &str, b: &Board, state: &ChipState) -> Option<Click> {
@@ -628,7 +631,7 @@ fn sounds(ui: &mut Ui, server: &str, b: &Board, state: &ChipState) -> Option<Cli
         return chips(ui, server, &people, state);
     }
     let mut click = None;
-    group_label(ui, "Added with Discord Clip", Some("right-click to edit or delete"));
+    group_label(ui, "Added with Discord Clip", Some("right-click to save, edit or delete"));
     click = chips(ui, server, &bot, state).or(click);
     if !people.is_empty() {
         ui.add_space(14.0);
@@ -697,7 +700,7 @@ fn chip(ui: &mut Ui, server: &str, s: &Sound, state: &ChipState) -> Option<Click
         tip.push(what);
     } else if can_play {
         tip.push(if playing { "Click to stop" } else { "Click to play" });
-        tip.push(if s.by_bot { "Right-click to edit or delete" } else { "Right-click to save to Clips" });
+        tip.push(if s.by_bot { "Right-click to save to Clips, edit or delete" } else { "Right-click to save to Clips" });
     }
     if !s.available {
         tip.push("Turned off: the server lost the boost for this slot");
